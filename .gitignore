@@ -1,5 +1,8 @@
 .env
 outputs
-process_paper_v2.py
 2509.25426v2.pdf
 .DS_Store
+/test_data
+test_results.csv
+test_dataset_jw.zip
+/test_dataset_jw
