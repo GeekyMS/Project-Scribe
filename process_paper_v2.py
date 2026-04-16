@@ -2,11 +2,12 @@ import os
 import sys
 import json
 import re
+import time
 from pathlib import Path
 from dotenv import load_dotenv
+import httpx
 import fitz
 from openai import OpenAI
-import re
 
 
 load_dotenv()
@@ -14,9 +15,16 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not API_KEY:
     raise ValueError("Missing OPENROUTER_API_KEY in .env")
 
-client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=API_KEY)
-MODEL = "qwen/qwen3-14b"
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=API_KEY,
+    timeout=httpx.Timeout(120.0, connect=10.0),
+)
+MODEL = "anthropic/claude-opus-4.6"
 
+# LLM retry settings
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds between retries
 
 
 def extract_text_and_page_offsets(pdf_path: str):
@@ -28,7 +36,9 @@ def extract_text_and_page_offsets(pdf_path: str):
     for page in doc:
 
         page_offsets.append(len(full_text))
-        
+
+        # Insert page marker so the LLM knows the correct page number
+        full_text += f"\n--- PAGE {page.number + 1} ---\n"
 
         page_rect = page.rect
 
@@ -42,128 +52,227 @@ def extract_text_and_page_offsets(pdf_path: str):
         )
         
         # Extract text ONLY from the center body of the page
-        page_text = page.get_text("text", clip=clip_rect)
+        page_text = page.get_text("text", clip=clip_rect, sort=True)
         
         full_text += page_text + "\n"
         
     doc.close()
     return full_text, page_offsets
 
-def call_llm_strict_for_boundaries(text: str, max_chars=20000): #could break up into two functions, what if the related works section spans multiple pages?
-    """Strict prompt that asks for JSON with related_work boundaries and references."""
-    snippet = text[:max_chars]
-#     prompt = f"""
-# You are an assistant that extracts the Related Work section boundaries and references from an academic paper.
-# Return ONLY valid JSON with exactly two keys: "related_work" and "references".
 
-# related_work must be an object:
-# {{
-#     "start_page": <integer - 1-based>,
-#     "end_page": <integer - 1-based>,
-#     "start_snippet": "<the first 1-2 sentences of the Related Work section (exact text)>",
-#     "end_snippet": "<the last 1-2 sentences of the Related Work section (exact text)>"
-# }}
+def _build_prompt(snippet: str) -> str:
+    """Build the LLM prompt for extracting Related Work boundaries."""
+    return f"""You are an assistant that extracts the Related Work section boundaries from an academic paper.
 
-# CRITICAL: When selecting the start_snippet and end_snippet, only choose sentences that are part of the main body text. Avoid page numbers, headers, or watermarks like 'Preprint', as these are being filtered out of my system and will cause a coordinate mismatch.
+Your task: Find the section that reviews prior/related research.
 
-# references must be a list of objects with fields: title, author, venue, date, link.
+STEP 1 — Look for an explicitly labeled section. It may be titled:
+- "Related Work" / "Related Works"
+- "Background" / "Background and Related Work"  
+- "Literature Review" / "Literature Survey"
+- "Previous Work" / "Prior Work" / "Prior Art"
+- "State of the Art"
+- Or any similar variant
 
-# If a field is not found, return an empty string for that field.
-# Do not output any explanation or anything outside the JSON.
+STEP 2 — FALLBACK (only if Step 1 finds nothing):
+Some papers (especially older or non-CS papers) do not have a dedicated Related Work section.
+In that case, check the **Introduction** (or the opening section of the paper).
+The Introduction qualifies as a related-work equivalent if it:
+  - cites and discusses **specific prior works, systems, or approaches** by name, AND
+  - critiques their limitations, compares them, or explains why they are insufficient for the problem at hand.
 
-# Now analyze the following paper text (only the first {max_chars} characters are provided here for safety):
-# ---
-# {snippet}
-# ---
-# Respond with JSON only.
-# """
-    #edit prompt to request all parts of related works section(if it has multiple pages)
-    prompt = f"""
-You are an assistant that extracts the Related Work section boundaries and references from an academic paper.
-Return ONLY valid JSON with exactly two keys: "related_work".
+The Introduction does NOT qualify if it:
+  - references a general scientific theory or framework as background (e.g. "Maxwell's electrodynamics") without citing specific prior solutions or approaches,
+  - mentions prior work only in a single sentence, or
+  - has no substantive discussion of what previous approaches did and why they fall short.
 
-related_work must be an object:
+When in doubt about whether the discussion is substantive enough, err on the side of including it.
+
+If neither Step 1 nor Step 2 yields a qualifying section, return null.
+
+Return ONLY valid JSON with exactly one key: "related_work".
+
+If a section is found (from Step 1 or Step 2), related_work must be an object:
 {{
-    "start_page": <integer - 1-based>,
-    "end_page": <integer - 1-based>,
-    "start_snippet": "<the first 1-2 sentences of the Related Work section (exact text)>",
-    "end_snippet": "<the last 1-2 sentences of the Related Work section (exact text)>"
+    "source": "explicit" or "fallback",
+    "start_page": <integer - 1-based page number>,
+    "end_page": <integer - 1-based page number>,
+    "start_snippet": "<the first 1-2 sentences of the section (exact text from the paper)>",
+    "end_snippet": "<the last 1-2 sentences of the section (exact text from the paper)>"
 }}
 
-CRITICAL: When selecting the start_snippet and end_snippet, only choose sentences that are part of the main body text. Avoid page numbers, headers, or watermarks like 'Preprint', as these are being filtered out of my system and will cause a coordinate mismatch.
+Set "source" to "explicit" if you found a labeled section heading (Step 1).
+Set "source" to "fallback" if you used the Introduction (Step 2).
 
-If a field is not found, return an empty string for that field.
-Do not output any explanation or anything outside the JSON.
+If the paper does NOT discuss prior work anywhere, return:
+{{
+    "related_work": null
+}}
 
-Now analyze the following paper text (only the first {max_chars} characters are provided here for safety):
+CRITICAL RULES:
+- The text contains explicit page markers in the format "--- PAGE X ---". Use these markers to determine the correct page numbers.
+- start_snippet and end_snippet must be EXACT text copied from the paper — do not paraphrase.
+- Only choose sentences from the main body text. Avoid page numbers, headers, footers, or watermarks like 'Preprint'.
+- The section starts AFTER the section heading and ends BEFORE the next major section heading.
+- If the text provided is only a portion of the paper and you cannot find the section, return null.
+- If you use the Introduction fallback, the start_snippet should be the first sentence of the Introduction, and the end_snippet should be the LAST sentence of the Introduction (i.e., the sentence just before the next major section heading begins). Include the entire Introduction — do not try to trim it to only the sentences that mention prior work.
+
+Now analyze the following paper text:
 ---
 {snippet}
 ---
-Respond with JSON only.
-"""
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"}
-    )
+Respond with JSON only."""
 
 
-    # raw = response.choices[0].message.content
-    # #inspect the json structure, and see what kinds of errors we are running into and put guardrails in for that
-    # #functions to handle other raw output errors
-    # try:
-    #     print("LLM Raw Response:", raw)
-    #     data = json.loads(raw) if isinstance(raw, str) else raw
-        
-    #     # If the LLM put the info in "related_works" (plural) instead of "related_work"
-    #     if "related_works" in data and "related_work" not in data:
-    #         data["related_work"] = data.pop("related_works")
-            
-    #     # If "related_work" is a string, we need to handle that or it will crash later
-    #     if isinstance(data.get("related_work"), str):
-    #         print("⚠️ LLM returned related_work as a string. Attempting to recover...")
-    #         data["related_work"] = {
-    #             "start_page": 1, 
-    #             "end_page": 1, 
-    #             "start_snippet": data["related_work"][:100], 
-    #             "end_snippet": data["related_work"][-100:]
-    #         }
-    #     return data
-    # except Exception as e:
-    #     print(f"❌ JSON Parsing Error: {e}")
-    #     return {"related_work": {"start_page": 1}, "references": []}
+def _call_llm_single(snippet: str) -> dict:
+    """Make a single LLM call with retry logic. Returns parsed dict or None on failure."""
+    prompt = _build_prompt(snippet)
 
-    raw = response.choices[0].message.content
-
-    # 1. Regex to find the JSON object (ignoring garbage like "k>")
-    match = re.search(r'\{.*\}', raw, re.DOTALL)
-    
-    data = None
-    if match:
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            print("LLM Raw Response:", raw)
-            data = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass # Fall through to failure handling below
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                timeout=90.0,  # per-request timeout
+            )
 
-    # 2. If valid JSON was found, normalize keys
-    if data:
-        if "related_works" in data and "related_work" not in data:
-            data["related_work"] = data.pop("related_works")
-            
-        if isinstance(data.get("related_work"), str):
-            print("⚠️ LLM returned related_work as a string. Attempting to recover...")
-            data["related_work"] = {
-                "start_page": 1, 
-                "end_page": 1, 
-                "start_snippet": data["related_work"][:100], 
-                "end_snippet": ""
-            }
-        return data
+            raw = response.choices[0].message.content
 
-    # 3. Fallback if no JSON found or parsing failed
-    print(f"❌ JSON Parsing Error or No JSON found. Raw start: {repr(raw[:50])}")
-    return {"related_work": {"start_page": 1}, "references": []}
+            if raw is None:
+                print(f"   ⚠️ LLM returned empty content on attempt {attempt}")
+                if attempt < MAX_RETRIES:
+                    print(f"   Retrying in {RETRY_DELAY}s...")
+                    time.sleep(RETRY_DELAY)
+                continue
+
+            # Filter out <think>...</think> tags (reasoning models)
+            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL)
+
+            # Regex to find the JSON object
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                    print(f"   LLM Raw Response (attempt {attempt}): {raw[:500]}...")
+
+                    # Normalize keys
+                    if "related_works" in data and "related_work" not in data:
+                        data["related_work"] = data.pop("related_works")
+
+                    if isinstance(data.get("related_work"), str):
+                        print("   ⚠️ LLM returned related_work as a string. Attempting to recover...")
+                        data["related_work"] = {
+                            "start_page": 1,
+                            "end_page": 1,
+                            "start_snippet": data["related_work"][:100],
+                            "end_snippet": "",
+                        }
+                    return data
+                except json.JSONDecodeError:
+                    print(f"   ⚠️ JSON parse failed on attempt {attempt}. Raw: {repr(raw[:100])}")
+
+            else:
+                print(f"   ⚠️ No JSON found in response on attempt {attempt}. Raw: {repr(raw[:100])}")
+
+        except Exception as e:
+            print(f"   ⚠️ LLM call failed on attempt {attempt}: {e}")
+
+        if attempt < MAX_RETRIES:
+            print(f"   Retrying in {RETRY_DELAY}s...")
+            time.sleep(RETRY_DELAY)
+
+    return None
+
+
+def call_llm_strict_for_boundaries(text: str, max_chars=25000, overlap=5000):
+    """
+    Extract Related Work boundaries using a sliding window approach.
+    
+    Splits the text into overlapping chunks and calls the LLM on each.
+    Collects all valid results, then prefers explicitly-labeled sections
+    over fallback (intro-based) results.
+    """
+    text_len = len(text)
+    
+    # Build list of windows
+    windows = []
+    start = 0
+    while start < text_len:
+        end = min(start + max_chars, text_len)
+        windows.append((start, end))
+        if end >= text_len:
+            break
+        start += max_chars - overlap  # advance by (window - overlap)
+    
+    print(f"   📊 Text length: {text_len} chars → {len(windows)} window(s)")
+    
+    explicit_results = []   # results from labeled section headings
+    fallback_results = []   # results from intro-based fallback
+    
+    for i, (win_start, win_end) in enumerate(windows):
+        snippet = text[win_start:win_end]
+        print(f"   🔍 Window {i+1}/{len(windows)}: chars [{win_start}–{win_end}]")
+        
+        result = _call_llm_single(snippet)
+        
+        if result is None:
+            print(f"   ❌ Window {i+1} returned no valid response")
+            continue
+        
+        rw = result.get("related_work")
+        
+        # If LLM says null (no related work found in this chunk), try next chunk
+        if rw is None:
+            print(f"   ℹ️ Window {i+1}: LLM found no Related Work section in this chunk")
+            continue
+        
+        # Validate that we got meaningful data
+        if isinstance(rw, dict) and (rw.get("start_snippet") or rw.get("start_page")):
+            source = rw.get("source", "explicit")  # default to explicit if field missing
+            if source == "fallback":
+                print(f"   📎 Window {i+1}: Found fallback (intro-based) Related Work")
+                fallback_results.append(result)
+            else:
+                print(f"   ✅ Window {i+1}: Found explicitly-labeled Related Work section!")
+                explicit_results.append(result)
+        else:
+            print(f"   ⚠️ Window {i+1}: LLM returned empty/invalid related_work object")
+    
+    # Prefer explicit results over fallback
+    if explicit_results:
+        # Merge overlapping explicit results across windows:
+        # Use earliest start_page, latest end_page, start_snippet from earliest, end_snippet from latest
+        def get_page(r, key):
+            rw = r.get("related_work", {})
+            return int(rw.get(key, 0)) if isinstance(rw, dict) else 0
+        
+        # Sort by start_page
+        explicit_results.sort(key=lambda r: get_page(r, "start_page"))
+        
+        first = explicit_results[0]
+        last = explicit_results[-1]
+        
+        # Merge: take start info from first, end info from last
+        merged_rw = dict(first.get("related_work", {}))
+        last_rw = last.get("related_work", {})
+        merged_rw["end_page"] = max(get_page(first, "end_page"), get_page(last, "end_page"))
+        if last_rw.get("end_snippet"):
+            merged_rw["end_snippet"] = last_rw["end_snippet"]
+        
+        chosen = {"related_work": merged_rw}
+        print(f"   🏆 Using explicitly-labeled section (merged from {len(explicit_results)} hit(s), pages {merged_rw.get('start_page')}-{merged_rw.get('end_page')})")
+        return chosen
+    
+    if fallback_results:
+        chosen = fallback_results[0]
+        print(f"   📎 Using fallback intro-based result (no explicit section found)")
+        return chosen
+    
+    # If no window found anything, return null (paper has no related work section)
+    print(f"   ℹ️ No Related Work section found in any window")
+    return {"related_work": None}
 
 def save_bibtex(references, out_path="references.bib"):
     """Simple bibtex generator."""
@@ -490,6 +599,16 @@ def main(argv):
         print("❌ Unexpected LLM response. Dumping and exiting.")
         print(result)
         sys.exit(1)
+
+    if result.get("related_work") is None:
+        print("ℹ️ No Related Work section found in this paper.")
+        # Save raw JSON for debugging
+        outputs_dir = Path("outputs")
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        with open(outputs_dir / "related_work_raw.json", "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+        print(f"📦 Raw response saved to {outputs_dir / 'related_work_raw.json'}")
+        return
 
     outputs_dir = Path("outputs")
     process_pdf_hybrid_removal(pdf_path, result, outputs_dir=outputs_dir)

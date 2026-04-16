@@ -6,3 +6,8 @@ outputs
 test_results.csv
 test_dataset_jw.zip
 /test_dataset_jw
+dataFlow.png
+/Logs
+__pycache__/
+*.py[cod]
+*$py.class

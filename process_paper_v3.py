@@ -44,7 +44,7 @@ def extract_text_and_page_offsets(pdf_path: str):
         )
         
         # Extract text ONLY from the center body of the page
-        page_text = page.get_text("text", clip=clip_rect)
+        page_text = page.get_text("text", clip=clip_rect, sort=True)
         # ----------------------------------
         
         full_text += page_text + "\n"
