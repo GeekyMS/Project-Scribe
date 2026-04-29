@@ -25,6 +25,7 @@ from .extractor import extract_text_and_page_offsets, extract_boundaries, _call_
 from .gate import run_extraction_gate
 from .verifier import verify_extraction
 from .error_analyzer import analyze_error, build_correction_from_error
+from .bib_extractor import run_bib_extraction
 
 # Maximum number of extraction attempts (iterations through the loop)
 MAX_ITERATIONS = 3
@@ -50,12 +51,14 @@ def _run_null_challenger(full_text: str) -> dict | None:
     
     # Reuse the same LLM call infrastructure
     import re, json, time
-    from .extractor import client, MODEL, MAX_RETRIES, RETRY_DELAY
+    from .extractor import client, MAX_RETRIES, RETRY_DELAY
+    
+    CHALLENGER_MODEL = "anthropic/claude-sonnet-4.6"
     
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.chat.completions.create(
-                model=MODEL,
+                model=CHALLENGER_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
                 timeout=90.0,
@@ -119,6 +122,7 @@ def run_pipeline(pdf_path: str, outputs_dir: str = "outputs") -> PipelineResult:
     print(f"   Extracted {len(full_text)} chars from {len(page_offsets)} pages")
 
     result = PipelineResult(paper=paper_name, final_status="failed")
+    result.full_text = full_text  # kept for Stage 4 bibliography extraction
     correction_context = None
     best_result = None  # Track the best partial result across iterations
 
@@ -147,41 +151,37 @@ def run_pipeline(pdf_path: str, outputs_dir: str = "outputs") -> PipelineResult:
             print(f"   ℹ️ LLM returned null — no Related Work section "
                   f"(min confidence: {avg_confidence:.0f}%)")
             
-            # ── Null Challenger (disabled for now — focusing on modern CS papers) ──
-            # Uncomment below to enable second-opinion check for low-confidence nulls.
-            # This triggers a more permissive LLM call on the introduction when
-            # min_null_confidence < NULL_CONFIDENCE_THRESHOLD (85%).
-            # Useful for older/non-CS papers (e.g. Shannon) where the intro
-            # serves as related work but doesn't match standard patterns.
-            #
-            # if avg_confidence < NULL_CONFIDENCE_THRESHOLD and iteration == 1:
-            #     print(f"   ⚠️ Confidence {avg_confidence:.0f}% < {NULL_CONFIDENCE_THRESHOLD}% threshold")
-            #     challenger_result = _run_null_challenger(full_text)
-            #     if challenger_result is not None:
-            #         boundaries = Boundaries.from_dict(challenger_result)
-            #         record.boundaries = challenger_result.get("related_work")
-            #         if boundaries is not None:
-            #             print(f"   🔄 Challenger overrode null — proceeding with extraction")
-            #         else:
-            #             record.gate_status = "null_confirmed"
-            #             result.iterations.append(record)
-            #             result.final_status = "no_related_work"
-            #             result.total_iterations = iteration
-            #             break
-            #     else:
-            #         record.gate_status = "null_confirmed"
-            #         result.iterations.append(record)
-            #         result.final_status = "no_related_work"
-            #         result.total_iterations = iteration
-            #         break
-            # else:
-
-            # Accept null directly
-            record.gate_status = "null"
-            result.iterations.append(record)
-            result.final_status = "no_related_work"
-            result.total_iterations = iteration
-            break
+            # ── Null Challenger (Stage 3C) ──
+            # If confidence is low, run a more permissive second-opinion check
+            # on the introduction. Useful for older/non-CS papers (e.g. Shannon)
+            # where the intro serves as related work but doesn't match standard patterns.
+            if avg_confidence < NULL_CONFIDENCE_THRESHOLD and iteration == 1:
+                print(f"   ⚠️ Confidence {avg_confidence:.0f}% < {NULL_CONFIDENCE_THRESHOLD}% threshold")
+                challenger_result = _run_null_challenger(full_text)
+                if challenger_result is not None:
+                    boundaries = Boundaries.from_dict(challenger_result)
+                    record.boundaries = challenger_result.get("related_work")
+                    if boundaries is not None:
+                        print(f"   🔄 Challenger overrode null — proceeding with extraction")
+                    else:
+                        record.gate_status = "null_confirmed"
+                        result.iterations.append(record)
+                        result.final_status = "no_related_work"
+                        result.total_iterations = iteration
+                        break
+                else:
+                    record.gate_status = "null_confirmed"
+                    result.iterations.append(record)
+                    result.final_status = "no_related_work"
+                    result.total_iterations = iteration
+                    break
+            else:
+                # Accept null directly (high confidence or not first iteration)
+                record.gate_status = "null"
+                result.iterations.append(record)
+                result.final_status = "no_related_work"
+                result.total_iterations = iteration
+                break
 
         print(f"   📍 Boundaries: pages {boundaries.start_page}-{boundaries.end_page}, "
               f"source={boundaries.source}")
@@ -286,15 +286,16 @@ def run_pipeline(pdf_path: str, outputs_dir: str = "outputs") -> PipelineResult:
 
         result.iterations.append(record)
 
-    # ── Save pipeline log ──
-    log_path = outputs_dir / "pipeline_log.json"
-    with open(log_path, "w", encoding="utf-8") as f:
-        json.dump(result.to_log_dict(), f, indent=2, ensure_ascii=False)
-    print(f"\n📋 Pipeline log saved → {log_path}")
 
     # ── Generate output files if we have a result ──
     if result.boundaries and result.final_status in ("accepted", "accepted_with_flag"):
         _generate_outputs(pdf_path, result, outputs_dir)
+
+    # ── Save pipeline log (after Stage 4 so bib results are included) ──
+    log_path2 = outputs_dir / "pipeline_log.json"
+    with open(log_path2, "w", encoding="utf-8") as f:
+        json.dump(result.to_log_dict(), f, indent=2, ensure_ascii=False)
+    print(f"\n📋 Pipeline log saved → {log_path2}")
 
     print(f"\n{'='*60}")
     print(f"🏁 Final status: {result.final_status} "
@@ -324,6 +325,16 @@ def _generate_outputs(pdf_path: str, result: PipelineResult, outputs_dir: Path):
         _pdf_hybrid_removal(pdf_path, boundaries, outputs_dir)
     except Exception as e:
         print(f"   ⚠️ PDF generation error: {e}")
+
+    # ── Stage 4: Bibliography extraction ──
+    if result.extracted_text and result.full_text:
+        try:
+            bib_result = run_bib_extraction(
+                result.full_text, result.extracted_text, outputs_dir
+            )
+            result.bib_result = bib_result
+        except Exception as e:
+            print(f"   ⚠️ Bibliography extraction error: {e}")
 
 
 def _find_first_rect(page, snippet: str):

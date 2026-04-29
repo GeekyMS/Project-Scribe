@@ -16,6 +16,8 @@ Outputs (in ./outputs/):
     - paper_without_related.pdf — PDF with the section removed
     - related_work.txt          — Extracted section text
     - related_work_raw.json     — LLM boundaries
+    - references.bib            — BibTeX file of cited papers (new in v4.1)
+    - references.json           — Raw matched bibliography entries (new in v4.1)
     - pipeline_log.json         — Full iteration history (new in v4)
 """
 

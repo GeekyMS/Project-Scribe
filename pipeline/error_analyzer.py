@@ -9,7 +9,9 @@ import json
 import re
 import time
 
-from .extractor import client, MODEL, MAX_RETRIES, RETRY_DELAY
+from .extractor import client, MAX_RETRIES, RETRY_DELAY
+
+ERROR_ANALYSIS_MODEL = "anthropic/claude-sonnet-4.6"
 from .prompts import build_error_analysis_prompt
 from .schemas import ErrorAnalysis
 
@@ -37,7 +39,7 @@ def analyze_error(
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.chat.completions.create(
-                model=MODEL,
+                model=ERROR_ANALYSIS_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
                 timeout=90.0,

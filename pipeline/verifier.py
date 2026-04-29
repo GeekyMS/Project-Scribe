@@ -9,7 +9,9 @@ import json
 import re
 import time
 
-from .extractor import client, MODEL, MAX_RETRIES, RETRY_DELAY
+from .extractor import client, MAX_RETRIES, RETRY_DELAY
+
+VERIFICATION_MODEL = "anthropic/claude-sonnet-4.6"
 from .prompts import build_verification_prompt
 from .schemas import VerificationResult
 
@@ -32,7 +34,7 @@ def verify_extraction(extracted_text: str, source_type: str) -> VerificationResu
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.chat.completions.create(
-                model=MODEL,
+                model=VERIFICATION_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
                 timeout=90.0,

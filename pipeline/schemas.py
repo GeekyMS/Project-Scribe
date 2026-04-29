@@ -101,6 +101,40 @@ class ErrorAnalysis:
 
 
 @dataclass
+class CitationInfo:
+    """Parsed citation information from the related work text."""
+    style: str  # "numerical" or "author-date"
+    keys: set = field(default_factory=set)
+
+    def to_dict(self) -> dict:
+        return {
+            "style": self.style,
+            "keys": sorted(self.keys, key=lambda x: str(x)),
+        }
+
+
+@dataclass
+class BibExtractionResult:
+    """Result of bibliography extraction (Stage 4)."""
+    citation_style: str = ""  # "numerical" or "author-date"
+    citations_found: int = 0
+    entries_matched: int = 0
+    entries_resolved: int = 0
+    bib_content: str = ""
+    entries: list[dict] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "citation_style": self.citation_style,
+            "citations_found": self.citations_found,
+            "entries_matched": self.entries_matched,
+            "entries_resolved": self.entries_resolved,
+            "errors": self.errors,
+        }
+
+
+@dataclass
 class IterationRecord:
     """Record of a single iteration through the pipeline."""
     attempt: int
@@ -119,11 +153,13 @@ class PipelineResult:
     total_iterations: int = 0
     boundaries: Optional[Boundaries] = None
     extracted_text: Optional[str] = None
+    full_text: Optional[str] = None  # kept for Stage 4 bibliography extraction
+    bib_result: Optional[BibExtractionResult] = None
     iterations: list[IterationRecord] = field(default_factory=list)
 
     def to_log_dict(self) -> dict:
         """Serialize the full pipeline run for pipeline_log.json."""
-        return {
+        log = {
             "paper": self.paper,
             "final_status": self.final_status,
             "total_iterations": self.total_iterations,
@@ -140,3 +176,6 @@ class PipelineResult:
                 for it in self.iterations
             ],
         }
+        if self.bib_result:
+            log["bibliography"] = self.bib_result.to_dict()
+        return log

@@ -32,11 +32,11 @@ The Introduction qualifies as a related-work equivalent if it:
   - critiques their limitations, compares them, or explains why they are insufficient for the problem at hand.
 
 The Introduction does NOT qualify if it:
-  - references a general scientific theory or framework as background (e.g. "Maxwell's electrodynamics") without citing specific prior solutions or approaches,
+  - discusses only abstract mathematical principles without referencing ANY specific prior methods, systems, or techniques by name,
   - mentions prior work only in a single sentence, or
   - has no substantive discussion of what previous approaches did and why they fall short.
 
-When in doubt about whether the discussion is substantive enough, err on the side of including it.
+When in doubt about whether the discussion is substantive enough, err on the side of including it. Papers from before ~1990 often embed their related work discussion into the Introduction without a separate section — be especially lenient with older papers.
 
 If neither Step 1 nor Step 2 yields a qualifying section, return null.
 
@@ -126,8 +126,11 @@ CHECK THE FOLLOWING:
    not bleeding into the next section like Methodology or Experiments)?
 4. Is there content that clearly belongs to a DIFFERENT section (e.g., methodology, 
    experiments, results, conclusion) that should NOT be included?
-5. For "fallback" extractions: Does the introduction genuinely serve as a related 
-   work discussion (cites and critiques specific prior work by name)?
+5. For "fallback" extractions: The introduction was ALREADY determined to serve as a 
+   related work equivalent by the extraction stage. Do NOT re-evaluate whether it qualifies.
+   Instead, only check that the extraction boundaries capture the FULL introduction 
+   (from first sentence to last sentence before the next major section heading).
+   Even brief mentions of prior methods, techniques, or works are acceptable for fallback.
 
 Return ONLY valid JSON:
 {{
@@ -264,3 +267,54 @@ Paper text (beginning of paper):
 {text_preview}
 ---
 Respond with JSON only."""
+
+
+def build_bibtex_generation_prompt(raw_entries: list[str], related_work_text: str) -> str:
+    """
+    Stage 4C — BibTeX generation prompt.
+    
+    Converts raw bibliography entries (extracted from the paper's References
+    section) into properly formatted BibTeX.
+    """
+    entries_text = "\n\n".join(f"--- Entry {i+1} ---\n{entry}" for i, entry in enumerate(raw_entries))
+    
+    # Truncate related work text to avoid token overflow
+    rw_preview = related_work_text[:8000]
+    if len(related_work_text) > 8000:
+        rw_preview += "\n[... truncated ...]"
+
+    return f"""You are a BibTeX formatting assistant for academic papers.
+
+You are given raw bibliography entries extracted from a research paper's References section. 
+These entries were cited in the paper's Related Work section (provided below for context).
+
+Your task: Convert each raw entry into a properly formatted BibTeX entry.
+
+RULES:
+1. Use the correct BibTeX entry type:
+   - @article for journal papers
+   - @inproceedings for conference papers  
+   - @book for books
+   - @phdthesis / @mastersthesis for dissertations
+   - @techreport for technical reports
+   - @misc for everything else (websites, preprints, arXiv papers)
+2. Include ALL available fields from the raw entry: author, title, year, 
+   journal/booktitle, volume, number, pages, doi, url, publisher
+3. Generate citation keys in the format: firstauthorlastname + year 
+   (e.g., smith2021). If there are duplicates, append a letter (smith2021a, smith2021b).
+4. Do NOT hallucinate or invent any information not present in the raw entries.
+   If a field is not available in the raw text, OMIT it entirely.
+5. Preserve author names exactly as they appear (do not expand initials you don't know).
+6. For arXiv preprints, use @misc with an eprint field.
+
+Return ONLY valid BibTeX content. No markdown code fences, no explanations, just BibTeX entries.
+
+RAW BIBLIOGRAPHY ENTRIES:
+{entries_text}
+
+RELATED WORK SECTION (for context on how these are cited):
+---
+{rw_preview}
+---
+
+Output BibTeX entries only:"""
