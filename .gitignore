@@ -13,3 +13,4 @@ __pycache__/
 *$py.class
 test_outputs
 *.log
+bib_test_results.csv

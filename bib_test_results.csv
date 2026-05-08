@@ -1,0 +1,12 @@
+File,Status,Style_Expected,Style_Actual,Style_Match,Citations_Expected,Citations_Actual,Citation_Recall,Citation_Precision,Match_Expected,Match_Actual,Match_Rate,Error
+paper1.pdf,PASS,numerical,numerical,True,21,21,1.00,1.00,21,21,1.00,
+paper10.pdf,PASS,numerical,numerical,True,22,22,1.00,1.00,0,0,1.00,
+paper14.pdf,PASS,numerical,numerical,True,15,15,1.00,1.00,15,15,1.00,
+paper15.pdf,PASS,numerical,numerical,True,12,12,1.00,1.00,12,12,1.00,
+paper17.pdf,PASS,numerical,numerical,True,16,16,1.00,1.00,0,0,1.00,
+paper19.pdf,PASS,author-date,author-date,True,33,33,1.00,1.00,0,0,1.00,
+paper2.pdf,PASS,numerical,numerical,True,12,12,1.00,1.00,4,4,1.00,
+paper4.pdf,PASS,numerical,numerical,True,26,26,1.00,1.00,0,0,1.00,
+paper7.pdf,PASS,author-date,author-date,True,41,41,1.00,1.00,20,20,1.00,
+paper8.pdf,PASS,numerical,numerical,True,14,14,1.00,1.00,14,14,1.00,
+paper9.pdf,PASS,numerical,numerical,True,19,19,1.00,1.00,19,19,1.00,
