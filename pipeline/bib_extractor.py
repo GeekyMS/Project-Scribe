@@ -14,7 +14,7 @@ from .extractor import client, MAX_RETRIES, RETRY_DELAY
 from .prompts import build_bibtex_generation_prompt
 from .schemas import CitationInfo, BibExtractionResult
 
-BIB_MODEL = "anthropic/claude-sonnet-4.6"
+BIB_MODEL = "anthropic/claude-opus-4.6"
 
 
 # ── Stage 4A: Parse citations from related work text ──
@@ -39,9 +39,45 @@ def _parse_numerical(text: str) -> set:
     return cited_numbers
 
 
+def _clean_citation_key(key: str) -> str | None:
+    """
+    Clean up a raw author-date citation key extracted from PDF text.
+    
+    Handles garbage from two-column PDF extraction where surrounding
+    text gets merged into the citation (e.g., 
+    "Col-\nwords has been an active area...    lobert and Weston, 2008").
+    
+    Returns cleaned key or None if the key is too mangled to salvage.
+    """
+    # Collapse all whitespace (newlines, tabs, multi-spaces) to single space
+    key = re.sub(r'\s+', ' ', key).strip()
+    
+    # Discard keys that are too long — real citations are short
+    # e.g., "Smith et al., 2024" is ~20 chars; allow up to 60 for
+    # multi-author keys like "Tjong Kim Sang and De Meulder, 2003"
+    if len(key) > 60:
+        return None
+    
+    # Must contain a 4-digit year
+    if not re.search(r'\d{4}', key):
+        return None
+    
+    # Must start with a capital letter (author surname)
+    if not re.match(r'[A-Z]', key):
+        return None
+    
+    # Count words — real citations typically have < 10 words
+    # (e.g., "Vaswani et al., 2017" = 4 words)
+    word_count = len(key.split())
+    if word_count > 10:
+        return None
+    
+    return key
+
+
 def _parse_author_date(text: str) -> set:
     """Extract author-date citation keys from parenthetical or bracket citations."""
-    keys = set()
+    raw_keys = set()
 
     # Pattern 1: Multi-citations in parens — (Hou et al., 2025; Xu et al., 2025)
     multi_paren = re.finditer(r'\(([^)]+\d{4}[^)]*)\)', text)
@@ -51,15 +87,15 @@ def _parse_author_date(text: str) -> set:
         for part in inner.split(';'):
             part = part.strip()
             if re.search(r'\d{4}', part) and re.search(r'[A-Z]', part):
-                keys.add(part)
+                raw_keys.add(part)
 
     # Pattern 2: Author et al. (YYYY) — outside parentheses
     for m in re.finditer(r'([\w\-]+\s+et\s+al\.?)\s*\((\d{4}[a-z]?)\)', text):
-        keys.add(f"{m.group(1)}, {m.group(2)}")
+        raw_keys.add(f"{m.group(1)}, {m.group(2)}")
 
     # Pattern 3: Author & Author (YYYY)
     for m in re.finditer(r'([\w\-]+\s+&\s+[\w\-]+)\s*[\(,]\s*(\d{4}[a-z]?)\)?', text):
-        keys.add(f"{m.group(1)}, {m.group(2)}")
+        raw_keys.add(f"{m.group(1)}, {m.group(2)}")
 
     # Pattern 4: Bracket-style author-date [Author et al., YYYY]
     for m in re.finditer(r'\[([^\]]*[A-Z][\w\-]*[^\]]*\d{4}[a-z]?[^\]]*)\]', text):
@@ -67,9 +103,36 @@ def _parse_author_date(text: str) -> set:
         for part in inner.split(';'):
             part = part.strip()
             if re.search(r'\d{4}', part) and re.search(r'[A-Z]', part):
-                keys.add(part)
+                raw_keys.add(part)
 
-    return keys
+    # Clean all keys — remove garbage from two-column extraction
+    cleaned_keys = set()
+    for key in raw_keys:
+        cleaned = _clean_citation_key(key)
+        if cleaned:
+            cleaned_keys.add(cleaned)
+    
+    # Deduplicate near-identical keys (e.g., "Dai and Le, 2015" appearing
+    # twice due to different extraction points in the text)
+    # Keep the shorter/cleaner version when two keys share the same
+    # author surname + year
+    final_keys = set()
+    seen_author_years = {}  # Maps (surname, year) -> best key
+    
+    for key in sorted(cleaned_keys, key=len):  # Process shortest first
+        # Extract primary author surname and year
+        m = re.match(r'([A-Z][\w\-]+)', key)
+        year_m = re.search(r'(\d{4}[a-z]?)', key)
+        if m and year_m:
+            author_year = (m.group(1).lower(), year_m.group(1))
+            if author_year not in seen_author_years:
+                seen_author_years[author_year] = key
+                final_keys.add(key)
+            # else: skip duplicate — we already have a cleaner version
+        else:
+            final_keys.add(key)
+    
+    return final_keys
 
 
 def parse_citations(related_work_text: str) -> CitationInfo:
@@ -109,20 +172,46 @@ def parse_citations(related_work_text: str) -> CitationInfo:
 def extract_bibliography_section(full_text: str) -> str | None:
     """
     Find and extract the References/Bibliography section from the full paper text.
+    
+    Handles multiple PDF extraction quirks:
+    - Heading on its own line: "References\n"
+    - Heading with trailing whitespace + first entry on same line (sort=True):
+      "References                                  [28] G. M..."
+    - Heading preceded by section number: "9. References"
+    - ALL CAPS: "REFERENCES"
     """
-    # Search for the section heading
-    pattern = re.compile(
-        r'^[\s]*(?:\d+\.?\s*)?(?:References|Bibliography|REFERENCES|BIBLIOGRAPHY)\s*$',
-        re.IGNORECASE | re.MULTILINE,
-    )
-    match = pattern.search(full_text)
-    if not match:
-        # Try less strict: heading might be inline
-        pattern2 = re.compile(
+    # Strategy: try multiple patterns from strict to permissive.
+    # We search for the LAST occurrence to avoid matching "References"
+    # appearing in body text (e.g., "there are many references to...").
+    
+    patterns = [
+        # Pattern 1: Strict — heading alone on a line (possibly with section number)
+        re.compile(
+            r'^[\s]*(?:\d+\.?\s*)?(?:References|Bibliography)\s*$',
+            re.IGNORECASE | re.MULTILINE,
+        ),
+        # Pattern 2: Heading followed by content on same line (sort=True artifact)
+        # e.g., "References                          [1] Author..."
+        # e.g., "REFERENCES                          distributed..."
+        re.compile(
+            r'^[\s]*(?:\d+\.?\s*)?(?:References|Bibliography)\s{6,}',
+            re.IGNORECASE | re.MULTILINE,
+        ),
+        # Pattern 3: Heading followed by newline (after optional PAGE marker)
+        re.compile(
             r'(?:--- PAGE \d+ ---\n)?[\s]*(?:References|Bibliography)\s*\n',
             re.IGNORECASE,
-        )
-        match = pattern2.search(full_text)
+        ),
+    ]
+    
+    match = None
+    for pattern in patterns:
+        # Find ALL matches — we want the LAST one (the actual bibliography,
+        # not a mention of "references" in body text like paper17)
+        all_matches = list(pattern.finditer(full_text))
+        if all_matches:
+            match = all_matches[-1]
+            break
 
     if not match:
         return None
@@ -146,7 +235,7 @@ def match_numerical_citations(citation_keys: set, bibliography_text: str) -> lis
     # Split by [N] markers
     entries = {}
     # Pattern: start of line with [N] 
-    parts = re.split(r'(?=\[\d+\])', bibliography_text)
+    parts = re.split(r'(?:\r?\n|^)\s*(?=\[\d+\])', bibliography_text)
     for part in parts:
         part = part.strip()
         if not part:
@@ -154,47 +243,113 @@ def match_numerical_citations(citation_keys: set, bibliography_text: str) -> lis
         m = re.match(r'\[(\d+)\]', part)
         if m:
             num = int(m.group(1))
-            entries[num] = part.strip()
+            # Don't overwrite the first match (real bibliography) with later appendix table matches
+            if num not in entries:
+                entries[num] = part.strip()
 
-    matched = []
+    matched = {}
     for key in sorted(citation_keys):
         if key in entries:
-            matched.append(entries[key])
+            matched[key] = entries[key]
 
     return matched
 
 
-def match_author_date_citations(citation_keys: set, bibliography_text: str) -> list[str]:
-    """Match author-date citations against bibliography entries."""
-    # Split bibliography into individual entries (by blank lines or [N] markers)
-    all_entries = re.split(r'\n\s*\n', bibliography_text)
-    # Filter out very short entries (likely noise)
-    all_entries = [e.strip() for e in all_entries if len(e.strip()) > 20]
-
-    matched = []
-    for key in citation_keys:
-        # Extract author name and year
-        m = re.search(r'([\w\-]+).*?(\d{4})', key)
-        if not m:
+def _split_bibliography_entries(bibliography_text: str) -> list[str]:
+    """
+    Split bibliography text into individual entries.
+    
+    Tries multiple strategies:
+    1. Double-newline split (most common in well-formatted papers)
+    2. If that yields too few entries, try splitting on lines that look
+       like the start of a new entry (capitalized author name pattern).
+    """
+    # Strategy 1: Double-newline split
+    entries = re.split(r'\n\s*\n', bibliography_text)
+    entries = [e.strip() for e in entries if len(e.strip()) > 20]
+    
+    if len(entries) >= 5:
+        return entries
+    
+    # Strategy 2: Split on author-name patterns at start of line.
+    # Typical patterns:
+    #   "Author, A. B., ..." or "Author, A., and ..."
+    #   Lines starting with a capital letter that look like a new entry.
+    # We split on lines matching: start-of-line, optional whitespace,
+    # then a capital letter followed by a lowercase letter (surname start).
+    lines = bibliography_text.split('\n')
+    entries = []
+    current_entry = []
+    
+    # Pattern for start of a new bib entry:
+    # - Starts with a capital letter (author surname)
+    # - Is NOT a section heading or page marker
+    entry_start = re.compile(r'^[A-Z][a-z]')
+    skip_pattern = re.compile(r'^(---|References|Bibliography|REFERENCES|BIBLIOGRAPHY|Appendix|\d+\.)', re.IGNORECASE)
+    
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
             continue
-        author_name, year = m.group(1), m.group(2)
+        
+        if entry_start.match(stripped) and not skip_pattern.match(stripped) and current_entry:
+            entry_text = ' '.join(current_entry).strip()
+            if len(entry_text) > 20:
+                entries.append(entry_text)
+            current_entry = [stripped]
+        else:
+            current_entry.append(stripped)
+    
+    # Don't forget the last entry
+    if current_entry:
+        entry_text = ' '.join(current_entry).strip()
+        if len(entry_text) > 20:
+            entries.append(entry_text)
+    
+    # If strategy 2 found more entries, use it; otherwise fall back to strategy 1
+    if len(entries) >= 5:
+        return entries
+    
+    # Fallback: return whichever gave more
+    fallback = re.split(r'\n\s*\n', bibliography_text)
+    fallback = [e.strip() for e in fallback if len(e.strip()) > 20]
+    return entries if len(entries) >= len(fallback) else fallback
+
+
+def match_author_date_citations(citation_keys: set, bibliography_text: str) -> dict:
+    """Match author-date citations against bibliography entries."""
+    all_entries = _split_bibliography_entries(bibliography_text)
+
+    matched = {}
+    for key in citation_keys:
+        # Extract the primary author surname and year from the citation key
+        # Handle various formats:
+        #   "Smith et al., 2024" -> author="Smith", year="2024"
+        #   "Tjong Kim Sang and De Meulder, 2003" -> author="Tjong", year="2003"
+        #   "Brown et al., 2020" -> author="Brown", year="2020"
+        m = re.match(r'([A-Z][\w\-]+)', key)
+        year_m = re.search(r'(\d{4})', key)
+        if not m or not year_m:
+            continue
+        author_name = m.group(1)
+        year = year_m.group(1)
 
         for entry in all_entries:
             if author_name.lower() in entry.lower() and year in entry:
-                if entry not in matched:
-                    matched.append(entry)
+                if key not in matched:
+                    matched[key] = entry
                 break
 
     return matched
 
 
-def match_citations_to_entries(citation_info: CitationInfo, bibliography_text: str) -> list[str]:
+def match_citations_to_entries(citation_info: CitationInfo, bibliography_text: str) -> dict:
     """Route to the correct matching function based on citation style."""
     if citation_info.style == "numerical":
         return match_numerical_citations(citation_info.keys, bibliography_text)
     elif citation_info.style == "author-date":
         return match_author_date_citations(citation_info.keys, bibliography_text)
-    return []
+    return {}
 
 
 # ── Stage 4C: LLM BibTeX generation ──
@@ -286,6 +441,8 @@ def run_bib_extraction(
 
     matched_entries = match_citations_to_entries(citation_info, bib_section)
     result.entries_matched = len(matched_entries)
+    matched_keys = sorted(list(matched_entries.keys()))
+    unmatched_keys = sorted(list(set(citation_info.keys) - set(matched_keys)))
     print(f"   📖 Matched {len(matched_entries)}/{len(citation_info.keys)} citations to bibliography entries")
 
     if not matched_entries:
@@ -295,7 +452,7 @@ def run_bib_extraction(
 
     # 4C: Generate BibTeX via LLM
     print(f"\n   📖 Stage 4C: Generating BibTeX via LLM...")
-    bib_content = generate_bibtex(matched_entries, related_work_text)
+    bib_content = generate_bibtex(list(matched_entries.values()), related_work_text)
 
     if bib_content:
         result.bib_content = bib_content
