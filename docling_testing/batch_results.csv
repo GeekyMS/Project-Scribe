@@ -1,0 +1,26 @@
+paper,docling_time_s,chars_extracted,pages,rw_found,rw_pages,citation_style,citations_found,entries_matched,entries_resolved,bib_section_chars,errors
+paper1.pdf,12.2,48753,15,True,2-2,numerical,10,10,10,8119,
+paper2.pdf,9.2,90429,15,True,14-14,numerical,12,12,12,2658,
+paper3.pdf,2.4,23730,7,False,,,0,0,0,0,No RW found (null_conf=72%)
+paper4.pdf,14.2,64055,12,True,2-2,numerical,20,20,20,24612,
+paper5.pdf,3.3,20620,9,False,,,0,0,0,0,No RW found (null_conf=72%)
+paper6.pdf,7.7,44911,24,True,1-2,unknown,0,0,0,0,No citations found in related work text
+paper7.pdf,83.8,377034,77,True,35-36,author-date,40,40,134,241628,
+paper8.pdf,4.8,54640,13,True,11-12,numerical,13,13,13,5447,
+paper9.pdf,6.7,69901,14,True,12-12,numerical,23,23,23,6456,
+paper10.pdf,6.3,91935,18,True,15-16,numerical,22,22,22,6639,
+paper11.pdf,17.4,146577,55,False,,,0,0,0,0,No RW found (null_conf=82%)
+paper12.pdf,3.2,10329,10,False,,,0,0,0,0,No RW found (null_conf=88%)
+paper13.pdf,38.4,202488,38,False,,,0,0,0,0,No RW found (null_conf=82%)
+paper14.pdf,8.6,45340,12,True,2-2,numerical,12,12,12,5032,
+paper15.pdf,3.7,35194,12,True,3-3,numerical,8,8,8,3220,
+paper16.pdf,15.9,65731,42,False,,,0,0,0,0,No RW found (null_conf=72%)
+paper17.pdf,7.7,99870,16,True,4-5,numerical,24,24,24,5984,
+paper18.pdf,9.4,8764,3,False,,,0,0,0,0,No RW found (null_conf=82%)
+paper19.pdf,11.1,69997,16,True,2-3,author-date,28,28,28,11258,
+paper20.pdf,3.0,40870,7,False,,,0,0,0,0,No RW found (null_conf=78%)
+paper21.pdf,88.9,332717,75,True,39-40,author-date,1,0,0,26942,No bibliography entries matched the citations
+paper22.pdf,163.2,754352,346,False,,,0,0,0,0,No RW found (null_conf=75%)
+paper23.pdf,12.4,85651,36,False,,,0,0,0,0,No RW found (null_conf=62%)
+paper24.pdf,4.5,69599,14,True,13-13,numerical,17,17,17,5010,
+paper25.pdf,6.2,48962,22,False,,,0,0,0,0,No RW found (null_conf=78%)

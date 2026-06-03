@@ -220,7 +220,7 @@ def extract_bibliography_section(full_text: str) -> str | None:
 
     # Trim at Appendix if present
     appendix_match = re.search(
-        r'^\s*(?:\d+\.?\s*)?(?:Appendix|APPENDIX|Supplementary)',
+        r'^\s*(?:#+\s*)?(?:\d+\.?\s*)?(?:Appendix|APPENDIX|Supplementary)',
         bib_text[100:],  # skip first 100 chars to avoid matching in heading
         re.IGNORECASE | re.MULTILINE,
     )
@@ -261,7 +261,9 @@ def _split_bibliography_entries(bibliography_text: str) -> list[str]:
     
     Tries multiple strategies:
     1. Double-newline split (most common in well-formatted papers)
-    2. If that yields too few entries, try splitting on lines that look
+    2. Single-line entries (Docling-style clean output where each entry
+       is on its own line with no blank-line separators)
+    3. If that yields too few entries, try splitting on lines that look
        like the start of a new entry (capitalized author name pattern).
     """
     # Strategy 1: Double-newline split
@@ -271,7 +273,24 @@ def _split_bibliography_entries(bibliography_text: str) -> list[str]:
     if len(entries) >= 5:
         return entries
     
-    # Strategy 2: Split on author-name patterns at start of line.
+    # Strategy 2: Single-line entries (Docling-style clean output).
+    # Detect when bibliography entries are one-per-line with no blank
+    # separators. Heuristic: if > 60% of non-empty, non-heading lines
+    # contain a 4-digit year, it's a one-entry-per-line bibliography.
+    heading_pattern = re.compile(
+        r'^(---|##|#|References|Bibliography|REFERENCES|BIBLIOGRAPHY|Appendix|\d+\.)',
+        re.IGNORECASE,
+    )
+    all_lines = [l.strip() for l in bibliography_text.split('\n') if l.strip()]
+    content_lines = [l for l in all_lines if not heading_pattern.match(l)]
+    year_lines = [l for l in content_lines if re.search(r'\b\d{4}\b', l)]
+    
+    if content_lines and len(year_lines) / len(content_lines) > 0.6:
+        entries = [l for l in content_lines if len(l) > 20]
+        if len(entries) >= 5:
+            return entries
+    
+    # Strategy 3: Split on author-name patterns at start of line.
     # Typical patterns:
     #   "Author, A. B., ..." or "Author, A., and ..."
     #   Lines starting with a capital letter that look like a new entry.
@@ -306,7 +325,7 @@ def _split_bibliography_entries(bibliography_text: str) -> list[str]:
         if len(entry_text) > 20:
             entries.append(entry_text)
     
-    # If strategy 2 found more entries, use it; otherwise fall back to strategy 1
+    # If strategy 3 found more entries, use it; otherwise fall back to strategy 1
     if len(entries) >= 5:
         return entries
     
