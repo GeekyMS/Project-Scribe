@@ -22,22 +22,35 @@ Outputs (in ./outputs/):
 """
 
 import sys
+import argparse
 from pathlib import Path
 
 from pipeline import run_pipeline
 
 
-def main(argv):
-    if len(argv) != 2:
-        print("Usage: python process_paper_v4.py <path_to_pdf>")
+def main():
+    parser = argparse.ArgumentParser(
+        description="Project Scribe v4 — Iterative LLM Pipeline for Related Work Extraction.",
+    )
+    parser.add_argument("pdf", help="Path to the input PDF file")
+    parser.add_argument(
+        "--extractor",
+        choices=["docling", "pymupdf"],
+        default="docling",
+        help="Text extraction backend (default: docling)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="outputs",
+        help="Directory for output files (default: outputs)",
+    )
+    args = parser.parse_args()
+
+    if not Path(args.pdf).exists():
+        print(f"❌ File not found: {args.pdf}")
         sys.exit(1)
 
-    pdf_path = argv[1]
-    if not Path(pdf_path).exists():
-        print(f"❌ File not found: {pdf_path}")
-        sys.exit(1)
-
-    result = run_pipeline(pdf_path, outputs_dir="outputs")
+    result = run_pipeline(args.pdf, outputs_dir=args.output_dir, extractor=args.extractor)
 
     # Exit code based on result
     if result.final_status == "failed":
@@ -49,4 +62,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    main()
+

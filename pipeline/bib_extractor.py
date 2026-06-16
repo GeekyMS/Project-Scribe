@@ -218,9 +218,13 @@ def extract_bibliography_section(full_text: str) -> str | None:
 
     bib_text = full_text[match.start():]
 
-    # Trim at Appendix if present
+    # Trim at Appendix / Author Contributions / Acknowledgments if present.
+    # Handles multiple formatting styles:
+    #   "Appendix A"  /  "## A Appendix"  /  "A.1 Contributions"
+    #   "Supplementary Material"  /  "Author Contributions"
+    #   "Acknowledgments"  /  "## Acknowledgments"
     appendix_match = re.search(
-        r'^\s*(?:#+\s*)?(?:\d+\.?\s*)?(?:Appendix|APPENDIX|Supplementary)',
+        r'^\s*(?:#+\s*)?(?:[A-Z]\.?\s+)?(?:Appendix|APPENDIX|Supplementary|Author\s+Contributions?|Acknowledgm?ents?)',
         bib_text[100:],  # skip first 100 chars to avoid matching in heading
         re.IGNORECASE | re.MULTILINE,
     )
@@ -271,7 +275,13 @@ def _split_bibliography_entries(bibliography_text: str) -> list[str]:
     entries = [e.strip() for e in entries if len(e.strip()) > 20]
     
     if len(entries) >= 5:
-        return entries
+        # Quality check: if entries are suspiciously large on average, they're
+        # likely page-blobs (e.g., text split on --- PAGE N --- markers rather
+        # than on individual entry boundaries).  Typical bib entries are
+        # 100–500 chars; page-blobs are 2000+ chars.
+        avg_len = sum(len(e) for e in entries) / len(entries)
+        if avg_len <= 2000:
+            return entries
     
     # Strategy 2: Single-line entries (Docling-style clean output).
     # Detect when bibliography entries are one-per-line with no blank

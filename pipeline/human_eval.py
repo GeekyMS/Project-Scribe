@@ -1,0 +1,352 @@
+"""
+Phase 2 — Human Evaluation Material Generator.
+
+Produces structured questionnaires for author review:
+  Protocol A: Blind A/B comparison (randomized, author doesn't know which is AI)
+  Protocol B: Dimension-specific Likert scoring (non-blind)
+
+Outputs both Markdown questionnaires and JSON schemas for response collection.
+"""
+
+import json
+import random
+from pathlib import Path
+
+
+def generate_human_eval_materials(
+    generated_text: str,
+    ground_truth: str,
+    model_name: str = "",
+    outputs_dir: str | Path = "outputs/generation",
+) -> dict:
+    """
+    Generate all human evaluation materials.
+    
+    Args:
+        generated_text: The LLM-generated Related Works section.
+        ground_truth: The original Related Works text.
+        model_name: Name of the model that generated the text.
+        outputs_dir: Directory for output files.
+    
+    Returns:
+        Dict with paths to generated files.
+    """
+    outputs_dir = Path(outputs_dir)
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    
+    paths = {}
+    
+    # Protocol A: Blind A/B
+    blind_path = _generate_blind_ab(generated_text, ground_truth, model_name, outputs_dir)
+    paths["blind_ab"] = str(blind_path)
+    
+    # Protocol B: Likert scoring
+    likert_path = _generate_likert_form(generated_text, ground_truth, model_name, outputs_dir)
+    paths["likert"] = str(likert_path)
+    
+    # JSON schema for responses
+    schema_path = _generate_response_schema(outputs_dir)
+    paths["schema"] = str(schema_path)
+    
+    # Ground truth copy
+    gt_path = outputs_dir / "ground_truth.txt"
+    gt_path.write_text(ground_truth, encoding="utf-8")
+    paths["ground_truth"] = str(gt_path)
+    
+    print(f"\n   👤 Human evaluation materials generated:")
+    for name, path in paths.items():
+        print(f"      {name}: {Path(path).name}")
+    
+    return paths
+
+
+def _generate_blind_ab(
+    generated: str,
+    ground_truth: str,
+    model_name: str,
+    outputs_dir: Path,
+) -> Path:
+    """Protocol A: Blind A/B comparison."""
+    
+    # Randomize which is A and which is B
+    # Store the mapping in a separate file (not shown to the evaluator)
+    if random.random() < 0.5:
+        version_a = generated
+        version_b = ground_truth
+        mapping = {"A": "generated", "B": "original"}
+    else:
+        version_a = ground_truth
+        version_b = generated
+        mapping = {"A": "original", "B": "generated"}
+    
+    # Save the mapping (for the researcher, NOT the evaluator)
+    mapping_path = outputs_dir / "blind_ab_mapping.json"
+    mapping_path.write_text(
+        json.dumps({
+            "mapping": mapping,
+            "model": model_name,
+            "note": "DO NOT share this file with the evaluator until after they complete the questionnaire.",
+        }, indent=2),
+        encoding="utf-8",
+    )
+    
+    doc = f"""# Related Works Evaluation — Blind Comparison
+
+**Instructions**: You are presented with two versions of a Related Works section for the same paper. One was written by the original authors, and one was generated. **You do not know which is which.**
+
+Please read both carefully and answer the questions below.
+
+---
+
+## Version A
+
+{version_a}
+
+---
+
+## Version B
+
+{version_b}
+
+---
+
+## Questions
+
+For each question, write **A** or **B** (or **Tie** if they are equal).
+
+### 1. Citation Usage
+Which version uses citations more substantively — actually describing what each cited paper contributes rather than just name-dropping?
+
+**Answer:** ___
+
+### 2. Narrative Flow
+Which version connects the cited works into a more coherent narrative?
+
+**Answer:** ___
+
+### 3. Paper Positioning
+Which version better positions the current paper's contribution relative to prior work?
+
+**Answer:** ___
+
+### 4. Thematic Organization
+Which version organizes the related work into more logical thematic groups?
+
+**Answer:** ___
+
+### 5. Depth of Engagement
+Which version demonstrates a deeper understanding of the cited works?
+
+**Answer:** ___
+
+### 6. Overall Preference
+Which version would you prefer to appear in the final paper?
+
+**Answer:** ___
+
+### 7. Detection
+Can you identify which version is AI-generated?
+
+**Answer (A or B):** ___
+
+**Confidence (1-5, where 5 = absolutely certain):** ___
+
+**Reasoning:** ___
+
+### 8. Specific Observations
+Are there any specific citations or passages where one version is notably better or worse than the other? Please describe.
+
+**Answer:** ___
+
+---
+
+*Thank you for your evaluation. Please save this file with your responses and return it to the researcher.*
+"""
+    
+    path = outputs_dir / "human_eval_blind_ab.md"
+    path.write_text(doc, encoding="utf-8")
+    return path
+
+
+def _generate_likert_form(
+    generated: str,
+    ground_truth: str,
+    model_name: str,
+    outputs_dir: Path,
+) -> Path:
+    """Protocol B: Dimension-specific Likert scoring (non-blind)."""
+    
+    doc = f"""# Related Works Evaluation — Detailed Scoring
+
+**Instructions**: Below is a Related Works section that was **generated by an AI model** ({model_name or 'model name withheld'}) for a research paper. The original Related Works section is provided afterward for reference.
+
+Please evaluate the generated section on each dimension using the 1-5 scale provided.
+
+---
+
+## Generated Related Works Section
+
+{generated}
+
+---
+
+## Original Related Works Section (for reference)
+
+{ground_truth}
+
+---
+
+## Evaluation Dimensions
+
+Rate each dimension from 1 (Poor) to 5 (Excellent).
+
+### 1. Citation Accuracy (1-5)
+Are the cited papers described correctly? Does the text accurately represent what each paper contributes?
+
+| 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| Major factual errors | Several inaccuracies | Mostly correct | Minor issues only | Fully accurate |
+
+**Score:** ___
+
+**Comments:** ___
+
+### 2. Coverage (1-5)
+Does the section cover the same research themes and topics as the original?
+
+| 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| Misses most themes | Covers some themes | Covers main themes | Minor gaps only | Comprehensive |
+
+**Score:** ___
+
+**Comments:** ___
+
+### 3. Framing & Positioning (1-5)
+Does it properly frame the paper's contribution relative to prior work?
+
+| 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| No positioning | Weak positioning | Some positioning | Good positioning | Excellent positioning |
+
+**Score:** ___
+
+**Comments:** ___
+
+### 4. Depth (1-5)
+Does it engage substantively with cited work, or just name-drop?
+
+| 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| Pure listing | Mostly superficial | Some depth | Good depth | Substantive engagement |
+
+**Score:** ___
+
+**Comments:** ___
+
+### 5. Flow & Coherence (1-5)
+Does the narrative connect papers into a coherent story?
+
+| 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| Disconnected | Some transitions | Reasonable flow | Good narrative | Seamless narrative |
+
+**Score:** ___
+
+**Comments:** ___
+
+### 6. Organization (1-5)
+Is the thematic grouping logical and well-structured?
+
+| 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| No organization | Weak structure | Acceptable | Well organized | Excellent structure |
+
+**Score:** ___
+
+**Comments:** ___
+
+### 7. Overall Quality (1-5)
+Would this pass peer review as a Related Works section?
+
+| 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| Unacceptable | Needs major revision | Adequate | Good quality | Publication-ready |
+
+**Score:** ___
+
+**Comments:** ___
+
+---
+
+## Open-Ended Questions
+
+### 8. Better or Worse References?
+Is any reference presented in a way that is **better** or **worse** than your original? Please identify specific examples and explain.
+
+**Answer:** ___
+
+### 9. Usability
+Would you use this generated section as a starting draft? What would you change?
+
+**Answer:** ___
+
+### 10. Missing Context
+Is there important context or nuance about any of the cited papers that the generated section misses?
+
+**Answer:** ___
+
+### 11. Additional Comments
+Any other observations about the quality of the generated Related Works section?
+
+**Answer:** ___
+
+---
+
+*Thank you for your evaluation. Please save this file with your responses and return it to the researcher.*
+"""
+    
+    path = outputs_dir / "human_eval_likert.md"
+    path.write_text(doc, encoding="utf-8")
+    return path
+
+
+def _generate_response_schema(outputs_dir: Path) -> Path:
+    """Generate a JSON schema for structured response collection."""
+    
+    schema = {
+        "protocol_a_blind_ab": {
+            "citation_usage": {"type": "string", "enum": ["A", "B", "Tie"]},
+            "narrative_flow": {"type": "string", "enum": ["A", "B", "Tie"]},
+            "paper_positioning": {"type": "string", "enum": ["A", "B", "Tie"]},
+            "thematic_organization": {"type": "string", "enum": ["A", "B", "Tie"]},
+            "depth_of_engagement": {"type": "string", "enum": ["A", "B", "Tie"]},
+            "overall_preference": {"type": "string", "enum": ["A", "B", "Tie"]},
+            "detection": {
+                "guess": {"type": "string", "enum": ["A", "B"]},
+                "confidence": {"type": "integer", "min": 1, "max": 5},
+                "reasoning": {"type": "string"},
+            },
+            "specific_observations": {"type": "string"},
+        },
+        "protocol_b_likert": {
+            "citation_accuracy": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            "coverage": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            "framing_positioning": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            "depth": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            "flow_coherence": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            "organization": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            "overall_quality": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            "better_worse_references": {"type": "string"},
+            "usability": {"type": "string"},
+            "missing_context": {"type": "string"},
+            "additional_comments": {"type": "string"},
+        },
+    }
+    
+    path = outputs_dir / "human_eval_schema.json"
+    path.write_text(
+        json.dumps(schema, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return path

@@ -160,16 +160,28 @@ def _map_norm_pos_to_original(original: str, normalized: str, norm_pos: int) -> 
     return len(original)
 
 
-def run_extraction_gate(pdf_path: str, boundaries: Boundaries) -> GateResult:
+def run_extraction_gate(
+    pdf_path: str,
+    boundaries: Boundaries,
+    full_text: str | None = None,
+) -> GateResult:
     """
     Stage 2 entry point.
     
     Validates that the LLM boundaries correspond to real content in the PDF
     and extracts the actual related work text.
     
+    Uses an "or" strategy: first tries PyMuPDF coordinate-level snippet search,
+    then falls back to searching within the Docling/PyMuPDF ``full_text`` string
+    (which may have different whitespace but preserves content). This makes the
+    gate robust to extraction-backend differences.
+    
     Args:
         pdf_path: Path to the PDF file.
         boundaries: LLM-provided boundaries (pages + snippets).
+        full_text: Optional pre-extracted full paper text (with PAGE markers).
+            When provided, used as a fallback source for snippet search and
+            text extraction if PyMuPDF coordinate search fails.
     
     Returns:
         GateResult with status, extracted text, and error details.
@@ -183,63 +195,102 @@ def run_extraction_gate(pdf_path: str, boundaries: Boundaries) -> GateResult:
 
     errors = []
 
-    # Search for start snippet
+    # ------------------------------------------------------------------
+    # Primary search: PyMuPDF coordinate-level snippet search
+    # ------------------------------------------------------------------
     start_rect, actual_start_page = _search_nearby_pages(
         doc, start_page_idx, boundaries.start_snippet, mode="first", radius=1
     )
     start_found = start_rect is not None
 
-    if not start_found:
-        errors.append(
-            f"start_snippet not found on page {boundaries.start_page} (±1). "
-            f"Searched for: {repr(boundaries.start_snippet[:80])}"
-        )
-
-    # Search for end snippet
     end_rect, actual_end_page = _search_nearby_pages(
         doc, end_page_idx, boundaries.end_snippet, mode="last", radius=1
     )
     end_found = end_rect is not None
 
-    if not end_found:
+    # ------------------------------------------------------------------
+    # Fallback search: try full_text string matching (Docling or PyMuPDF)
+    # ------------------------------------------------------------------
+    start_found_in_text = False
+    end_found_in_text = False
+
+    if full_text and (not start_found or not end_found):
+        norm_full = _normalize_for_search(full_text)
+
+        if not start_found and boundaries.start_snippet:
+            for anchor_len in [len(boundaries.start_snippet.strip()), 80, 50, 35]:
+                anchor = boundaries.start_snippet.strip()[:anchor_len]
+                if len(anchor) < 10:
+                    break
+                if _normalize_for_search(anchor) in norm_full:
+                    start_found_in_text = True
+                    print(f"   📎 start_snippet found in full_text (fallback)")
+                    break
+
+        if not end_found and boundaries.end_snippet:
+            for anchor_len in [len(boundaries.end_snippet.strip()), 80, 50, 35]:
+                anchor = boundaries.end_snippet.strip()[-anchor_len:]
+                if len(anchor) < 10:
+                    break
+                if _normalize_for_search(anchor) in norm_full:
+                    end_found_in_text = True
+                    print(f"   📎 end_snippet found in full_text (fallback)")
+                    break
+
+    # Combine both search results
+    effective_start_found = start_found or start_found_in_text
+    effective_end_found = end_found or end_found_in_text
+
+    if not effective_start_found:
+        errors.append(
+            f"start_snippet not found on page {boundaries.start_page} (±1). "
+            f"Searched for: {repr(boundaries.start_snippet[:80])}"
+        )
+    if not effective_end_found:
         errors.append(
             f"end_snippet not found on page {boundaries.end_page} (±1). "
             f"Searched for: {repr(boundaries.end_snippet[:80])}"
         )
 
     # Determine status
-    if start_found and end_found:
+    if effective_start_found and effective_end_found:
         status = "success"
-    elif start_found or end_found:
+    elif effective_start_found or effective_end_found:
         status = "partial"
     else:
         status = "error"
 
-    # Extract text from the relevant pages, trimmed to snippet boundaries
+    # ------------------------------------------------------------------
+    # Extract text — prefer PyMuPDF coordinate extraction, fall back to
+    # full_text string slicing
+    # ------------------------------------------------------------------
     extracted_text = None
     if status in ("success", "partial"):
-        # Use actual found pages if available, otherwise fall back to LLM pages
-        extract_start = actual_start_page if start_found else start_page_idx
-        extract_end = actual_end_page if end_found else end_page_idx
+        # Try PyMuPDF coordinate-based extraction first
+        if start_found or end_found:
+            extract_start = actual_start_page if start_found else start_page_idx
+            extract_end = actual_end_page if end_found else end_page_idx
 
-        # Make sure start <= end
-        if extract_start > extract_end:
-            extract_start, extract_end = extract_end, extract_start
+            if extract_start > extract_end:
+                extract_start, extract_end = extract_end, extract_start
 
-        text_parts = []
-        for p in range(extract_start, extract_end + 1):
-            text_parts.append(doc[p].get_text("text"))
-        full_page_text = "\n".join(text_parts).strip()
+            text_parts = []
+            for p in range(extract_start, extract_end + 1):
+                text_parts.append(doc[p].get_text("text"))
+            full_page_text = "\n".join(text_parts).strip()
 
-        # Trim to only the content between start_snippet and end_snippet
-        # This avoids sending adjacent section content to the verification LLM
-        extracted_text = _trim_to_snippets(
-            full_page_text, boundaries.start_snippet, boundaries.end_snippet
-        )
+            extracted_text = _trim_to_snippets(
+                full_page_text, boundaries.start_snippet, boundaries.end_snippet
+            )
 
-        if not extracted_text:
-            # Fall back to full page text if trimming fails
-            extracted_text = full_page_text
+            if not extracted_text:
+                extracted_text = full_page_text
+
+        # Fall back to full_text string extraction if PyMuPDF didn't work
+        if not extracted_text and full_text:
+            extracted_text = _trim_to_snippets(
+                full_text, boundaries.start_snippet, boundaries.end_snippet
+            )
 
         if not extracted_text:
             status = "error"
@@ -250,7 +301,7 @@ def run_extraction_gate(pdf_path: str, boundaries: Boundaries) -> GateResult:
     return GateResult(
         status=status,
         extracted_text=extracted_text,
-        start_found=start_found,
-        end_found=end_found,
+        start_found=effective_start_found,
+        end_found=effective_end_found,
         error_details="; ".join(errors) if errors else None,
     )

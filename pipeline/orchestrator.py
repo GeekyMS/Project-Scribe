@@ -22,6 +22,7 @@ from .schemas import (
     PipelineResult,
 )
 from .extractor import extract_text_and_page_offsets, extract_boundaries, _call_llm_single
+from .docling_extractor import DOCLING_AVAILABLE
 from .gate import run_extraction_gate
 from .verifier import verify_extraction
 from .error_analyzer import analyze_error, build_correction_from_error
@@ -96,13 +97,15 @@ def _run_null_challenger(full_text: str) -> dict | None:
     return None
 
 
-def run_pipeline(pdf_path: str, outputs_dir: str = "outputs") -> PipelineResult:
+def run_pipeline(pdf_path: str, outputs_dir: str = "outputs", extractor: str = "docling") -> PipelineResult:
     """
     Run the full iterative pipeline on a single PDF.
     
     Args:
         pdf_path: Path to the input PDF.
         outputs_dir: Directory for output files.
+        extractor: Extraction backend — "docling" (default, ML-based layout
+            detection) or "pymupdf" (fast, coordinate-based).
     
     Returns:
         PipelineResult with final status, boundaries, extracted text,
@@ -117,8 +120,18 @@ def run_pipeline(pdf_path: str, outputs_dir: str = "outputs") -> PipelineResult:
     print(f"{'='*60}")
 
     # ── Extract text ──
-    print("\n📝 Stage 0: Extracting text from PDF...")
-    full_text, page_offsets = extract_text_and_page_offsets(pdf_path)
+    use_docling = (extractor == "docling")
+    if use_docling and not DOCLING_AVAILABLE:
+        print("   ⚠️ Docling not installed, falling back to PyMuPDF")
+        use_docling = False
+
+    if use_docling:
+        from .docling_extractor import extract_text_docling
+        print("\n📝 Stage 0: Extracting text from PDF (Docling)...")
+        full_text, page_offsets = extract_text_docling(pdf_path)
+    else:
+        print("\n📝 Stage 0: Extracting text from PDF (PyMuPDF)...")
+        full_text, page_offsets = extract_text_and_page_offsets(pdf_path)
     print(f"   Extracted {len(full_text)} chars from {len(page_offsets)} pages")
 
     result = PipelineResult(paper=paper_name, final_status="failed")
@@ -188,7 +201,7 @@ def run_pipeline(pdf_path: str, outputs_dir: str = "outputs") -> PipelineResult:
 
         # ── Stage 2: Extraction gate ──
         print(f"\n⚙️ Stage 2: Extraction Gate")
-        gate_result = run_extraction_gate(pdf_path, boundaries)
+        gate_result = run_extraction_gate(pdf_path, boundaries, full_text=full_text)
         record.gate_status = gate_result.status
         print(f"   Gate result: {gate_result.status} "
               f"(start_found={gate_result.start_found}, end_found={gate_result.end_found})")
@@ -319,6 +332,17 @@ def _generate_outputs(pdf_path: str, result: PipelineResult, outputs_dir: Path):
         with open(outputs_dir / "related_work.txt", "w", encoding="utf-8") as f:
             f.write(result.extracted_text)
         print(f"   ✅ Saved related_work.txt")
+
+    # Save paper text without related work (markdown) for Phase 2 generation input.
+    # This avoids the lossy PDF → re-extract round-trip.
+    if result.full_text and result.extracted_text:
+        paper_without = result.full_text.replace(result.extracted_text, "")
+        # Clean up any resulting double-blank-lines from the removal
+        import re as _re
+        paper_without = _re.sub(r'\n{3,}', '\n\n', paper_without)
+        with open(outputs_dir / "paper_without_related.md", "w", encoding="utf-8") as f:
+            f.write(paper_without)
+        print(f"   ✅ Saved paper_without_related.md")
 
     # Generate PDFs using the existing hybrid removal logic
     try:
