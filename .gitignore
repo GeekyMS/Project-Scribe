@@ -14,3 +14,6 @@ __pycache__/
 test_outputs
 *.log
 bib_test_results.csv
+/research_test_with_phd/*
+2007.12061v3.pdf
+
