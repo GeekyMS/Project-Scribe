@@ -53,7 +53,7 @@ for PDF in "${PDFS[@]}"; do
     MOVED_PDF="${PAPER_DIR}/${BASENAME}"
 
     # Phase 1: Extract related work
-    if [ -f "${OUT_DIR}/references.bib" ] && [ -f "${OUT_DIR}/related_work.txt" ]; then
+    if [ -f "${OUT_DIR}/related_work.txt" ]; then
         echo "   ⏭️  Phase 1 outputs already exist, skipping extraction."
     else
         echo "   📄 Phase 1: Extracting (docling)..."
@@ -65,8 +65,10 @@ for PDF in "${PDFS[@]}"; do
             continue
         }
 
-        if [ ! -f "${OUT_DIR}/references.bib" ] || [ ! -f "${OUT_DIR}/related_work.txt" ]; then
-            echo "   ❌ Phase 1 missing outputs for ${BASENAME}, skipping."
+        # Only related_work.txt is strictly required; bib extraction can legitimately
+        # produce no output for some citation styles.
+        if [ ! -f "${OUT_DIR}/related_work.txt" ]; then
+            echo "   ❌ Phase 1 missing related_work.txt for ${BASENAME}, skipping."
             FAILED+=("${BASENAME} (Phase 1 missing outputs)")
             continue
         fi
@@ -95,6 +97,14 @@ print(f'Wrote {len(text)} chars to paper_without_related.md')
     fi
 
     # Phase 2: Generate related work + evaluate
+    # (requires references.bib — skip gracefully if bib extraction found nothing)
+    if [ ! -f "${OUT_DIR}/references.bib" ]; then
+        echo "   ⚠️  No references.bib found (bib extraction matched 0 citations)."
+        echo "   ⏭️  Skipping Phase 2 for ${BASENAME}."
+        SUCCESS+=("${BASENAME} (Phase 1 only — no bib)")
+        continue
+    fi
+
     echo "   🖊️  Phase 2: Generating & evaluating related work..."
     python generate_related_work.py \
         --paper        "${OUT_DIR}/paper_without_related.md" \
