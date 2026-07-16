@@ -277,3 +277,281 @@ Return ONLY valid JSON:
 }}
 
 Respond with JSON only."""
+
+
+def build_argumentative_role_prompt(
+    generated_text: str,
+    ground_truth: str,
+    paper_text: str,
+    bib_content: str,
+) -> str:
+    """
+    Build the Argumentative Role Analysis judge prompt (Tier 2B).
+
+    This is a SEPARATE judge call from the 7-dimension quality scorer.
+    It performs per-citation analysis across two dimensions:
+
+      Metric 1 — Argumentative Role Classification:
+        For each citation in both texts, classify the rhetorical role it serves
+        (foundation, contrast, gap, support, method, context) and compare.
+
+      Metric 2 — Selective Emphasis Accuracy:
+        For each shared citation, compare which specific aspect of the cited
+        paper is emphasized in the generated vs. original text.
+
+    Returns a JSON schema with per-citation role mappings and emphasis
+    comparisons that evaluator.py parses into aggregate scores.
+    """
+    # Truncate if needed to fit context
+    gen_preview = generated_text[:20000]
+    gt_preview = ground_truth[:20000]
+    paper_preview = paper_text[:15000]
+
+    return f"""You are an expert evaluator of academic argumentation. You will perform a detailed, per-citation analysis comparing a GENERATED Related Works section against the ORIGINAL from the same paper.
+
+## CITATION ROLE TAXONOMY
+
+Every citation in a Related Works section serves one of these rhetorical roles:
+
+| Role Code | Role Name | Description | Example |
+|-----------|-----------|-------------|---------|
+| FND | Foundation | Work the current paper builds upon directly | "Building on Smith (2020), we extend..." |
+| CTR | Contrast | Alternative approach cited to expose its limitations | "Unlike Jones (2019), which requires..." |
+| GAP | Gap | Cited to demonstrate what the field is missing | "However, none of these address..." |
+| SUP | Support | Corroborates a claim or validates the paper's premise | "This trend is well-documented (Chen, 2021)..." |
+| MTD | Method | Cited for a specific technique, dataset, or tool adopted | "Following the protocol of Park (2020)..." |
+| CTX | Context | Broad scene-setting with no specific argumentative function | "Machine learning has seen rapid advances..." |
+
+## YOUR TASKS
+
+### Task 1: Argumentative Role Classification
+For every citation that appears in EITHER the generated or original text:
+1. Identify the citation key
+2. Extract the sentence(s) surrounding the citation in each text
+3. Classify the rhetorical role using the taxonomy above
+4. If the citation appears in both texts, determine if the roles match
+
+### Task 2: Selective Emphasis Analysis
+For every citation that appears in BOTH texts:
+1. Identify what specific aspect of the cited paper the ORIGINAL text emphasizes
+2. Identify what specific aspect the GENERATED text emphasizes
+3. Rate the match as: "precise" (same aspect, same framing), "partial" (same area, different specific point), or "generic_or_different" (generic summary or entirely different aspect)
+
+## INPUTS
+
+### GENERATED Related Works:
+---
+{gen_preview}
+---
+
+### ORIGINAL Related Works (Ground Truth):
+---
+{gt_preview}
+---
+
+### Paper Context:
+---
+{paper_preview}
+---
+
+## OUTPUT FORMAT
+Return ONLY valid JSON:
+{{
+    "citation_roles": {{
+        "<citation_key>": {{
+            "generated_role": "<FND|CTR|GAP|SUP|MTD|CTX|ABSENT>",
+            "generated_context": "the sentence(s) from the generated text where this citation appears, or empty string if absent",
+            "original_role": "<FND|CTR|GAP|SUP|MTD|CTX|ABSENT>",
+            "original_context": "the sentence(s) from the original text where this citation appears, or empty string if absent",
+            "role_match": "<exact|adjacent|mismatch|one_sided>"
+        }}
+    }},
+    "emphasis_comparisons": {{
+        "<citation_key>": {{
+            "original_emphasis": "what specific aspect the original highlights about this work",
+            "generated_emphasis": "what specific aspect the generated text highlights about this work",
+            "match_level": "<precise|partial|generic_or_different>"
+        }}
+    }},
+    "role_distribution": {{
+        "generated": {{"FND": 0, "CTR": 0, "GAP": 0, "SUP": 0, "MTD": 0, "CTX": 0}},
+        "original": {{"FND": 0, "CTR": 0, "GAP": 0, "SUP": 0, "MTD": 0, "CTX": 0}}
+    }},
+    "summary": "2-3 sentence summary of how well the generated text preserves the argumentative roles and emphasis of the original"
+}}
+
+Respond with JSON only."""
+
+
+def build_coherence_prompt(
+    generated_text: str,
+    ground_truth: str,
+    paper_text: str,
+) -> str:
+    """
+    Build the Argumentative Coherence judge prompt (Tier 2C).
+
+    This is a SEPARATE judge call that evaluates section-level
+    argumentative properties across two dimensions:
+
+      Metric 3 — Challenge-Citation Alignment:
+        Extract the paper's core challenges/contributions, then check whether
+        the citations in the generated RW serve those challenges.
+
+      Metric 4 — Narrative Arc Scoring:
+        Assess whether the section follows a logical argumentative progression
+        from landscape → sub-problems → gaps → positioning.
+
+    Returns a JSON schema with challenge mappings, alignment scores,
+    and arc phase analysis.
+    """
+    # Truncate if needed to fit context
+    gen_preview = generated_text[:20000]
+    gt_preview = ground_truth[:20000]
+    paper_preview = paper_text[:20000]
+
+    return f"""You are an expert evaluator of academic argumentation. You will analyze the argumentative COHERENCE of a generated Related Works section — whether it builds a convincing case for the paper's contribution.
+
+## YOUR TASKS
+
+### Task 1: Challenge-Citation Alignment
+
+**Step A — Extract Challenges:** Read the paper context below and identify the paper's 3-7 core research challenges, contributions, or motivating problems. These are typically stated in the abstract and introduction as the problems the paper addresses.
+
+**Step B — Map Citations to Challenges:** For each citation in the GENERATED text, determine which challenge(s) it serves. A citation "serves" a challenge if it:
+- Establishes prior work on that challenge (foundation/context)
+- Shows limitations of existing approaches to that challenge (contrast/gap)
+- Validates the importance of that challenge (support)
+- Provides methodology relevant to addressing that challenge (method)
+
+If a citation doesn't clearly serve ANY of the paper's challenges, mark it as "unconnected."
+
+**Step C — Repeat for the ORIGINAL text.**
+
+**Step D — Compute Alignment:**
+- Challenge Coverage = fraction of challenges served by at least one citation
+- Citation Relevance = fraction of citations connected to at least one challenge
+- Alignment F1 = harmonic mean of coverage and relevance
+
+### Task 2: Narrative Arc Analysis
+
+A well-constructed Related Works follows an argumentative arc:
+
+1. **LANDSCAPE** — Broad field overview, orienting the reader
+2. **SUB-PROBLEMS** — Narrowing to specific relevant research areas
+3. **GAPS & LIMITATIONS** — What existing work doesn't solve (builds tension)
+4. **POSITIONING** — Where the current paper fits (resolves tension)
+
+For the GENERATED text:
+- Identify which paragraphs/passages correspond to each phase
+- Rate whether the phases appear in a logical order
+- Rate whether the balance across phases is appropriate
+
+Repeat for the ORIGINAL text for comparison.
+
+## INPUTS
+
+### GENERATED Related Works:
+---
+{gen_preview}
+---
+
+### ORIGINAL Related Works (Ground Truth):
+---
+{gt_preview}
+---
+
+### Paper Context (for extracting challenges):
+---
+{paper_preview}
+---
+
+## OUTPUT FORMAT
+Return ONLY valid JSON:
+{{
+    "challenges": [
+        {{
+            "id": "C1",
+            "description": "brief description of the challenge/contribution"
+        }}
+    ],
+    "challenge_citation_mapping": {{
+        "generated": {{
+            "<citation_key>": {{
+                "challenges_served": ["C1", "C3"],
+                "connection_explanation": "brief explanation of how this citation relates to the challenge(s)"
+            }}
+        }},
+        "original": {{
+            "<citation_key>": {{
+                "challenges_served": ["C1"],
+                "connection_explanation": "brief explanation"
+            }}
+        }}
+    }},
+    "alignment_scores": {{
+        "generated": {{
+            "challenge_coverage": 0.0,
+            "citation_relevance": 0.0,
+            "alignment_f1": 0.0,
+            "unconnected_citations": ["list of citation keys not serving any challenge"]
+        }},
+        "original": {{
+            "challenge_coverage": 0.0,
+            "citation_relevance": 0.0,
+            "alignment_f1": 0.0,
+            "unconnected_citations": []
+        }}
+    }},
+    "narrative_arc": {{
+        "generated": {{
+            "phases_present": {{
+                "landscape": true,
+                "sub_problems": true,
+                "gaps_limitations": true,
+                "positioning": true
+            }},
+            "phase_ordering_score": 0.0,
+            "phase_balance_score": 0.0,
+            "phase_details": {{
+                "landscape": "which paragraph(s) / brief quote",
+                "sub_problems": "which paragraph(s) / brief quote",
+                "gaps_limitations": "which paragraph(s) / brief quote",
+                "positioning": "which paragraph(s) / brief quote"
+            }}
+        }},
+        "original": {{
+            "phases_present": {{
+                "landscape": true,
+                "sub_problems": true,
+                "gaps_limitations": true,
+                "positioning": true
+            }},
+            "phase_ordering_score": 0.0,
+            "phase_balance_score": 0.0,
+            "phase_details": {{
+                "landscape": "which paragraph(s) / brief quote",
+                "sub_problems": "which paragraph(s) / brief quote",
+                "gaps_limitations": "which paragraph(s) / brief quote",
+                "positioning": "which paragraph(s) / brief quote"
+            }}
+        }}
+    }},
+    "narrative_arc_scores": {{
+        "generated": {{
+            "presence_score": 0.0,
+            "ordering_score": 0.0,
+            "balance_score": 0.0,
+            "composite_arc_score": 0.0
+        }},
+        "original": {{
+            "presence_score": 0.0,
+            "ordering_score": 0.0,
+            "balance_score": 0.0,
+            "composite_arc_score": 0.0
+        }}
+    }},
+    "coherence_summary": "2-3 sentence summary comparing the argumentative coherence of generated vs. original"
+}}
+
+Respond with JSON only."""

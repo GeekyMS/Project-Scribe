@@ -141,9 +141,53 @@ def parse_citations(related_work_text: str) -> CitationInfo:
     
     Tries both numerical and author-date parsing, then picks the style
     that yielded more matches (avoids false positives from noise).
+    
+    Special case: bracket-author-date style [Author et al., Year] is
+    detected and routed to author-date parsing, since the brackets cause
+    the numerical parser to produce false positives.
     """
     numerical_keys = _parse_numerical(related_work_text)
     author_date_keys = _parse_author_date(related_work_text)
+
+    # Detect bracket-author-date style: [Xiao et al., 2023], [Chen et al., 2023]
+    # These look like [text_with_letters, YYYY] and get mis-parsed as numerical
+    # because the brackets trigger _parse_numerical.
+    bracket_author_date = re.findall(
+        r'\[([A-Z][a-zA-Z]+(?:\s+(?:et\s+al\.|and\s+[A-Z][a-zA-Z]+))?\s*,\s*\d{4}(?:[a-z])?)\]',
+        related_work_text,
+    )
+    # Also catch multi-citation brackets: [Author1, 2020, Author2, 2021]
+    bracket_multi = re.findall(
+        r'\[([A-Z][a-zA-Z].*?\d{4}[a-z]?)\]',
+        related_work_text,
+    )
+    has_bracket_author_date = len(bracket_author_date) >= 3 or (
+        len(bracket_multi) >= 3 and any(
+            re.search(r'[A-Za-z]{3,}', m) for m in bracket_multi
+        )
+    )
+
+    if has_bracket_author_date:
+        # This paper uses [Author, Year] style — extract them as author-date keys
+        # and suppress the numerical parser which would misfire
+        all_bracket_keys = set()
+        for m in bracket_multi:
+            # Split multi-citations like "Xiao et al., 2023, Chen et al., 2023"
+            # into individual keys
+            sub_keys = re.findall(
+                r'([A-Z][a-zA-Z]+(?:\s+(?:et\s+al\.|and\s+[A-Z][a-zA-Z]+))?\s*,\s*\d{4}[a-z]?)',
+                m,
+            )
+            for k in sub_keys:
+                cleaned = _clean_citation_key(k)
+                if cleaned:
+                    all_bracket_keys.add(cleaned)
+
+        combined_keys = author_date_keys | all_bracket_keys
+        if combined_keys:
+            print(f"   📖 Detected bracket author-date citation style "
+                  f"({len(combined_keys)} unique refs)")
+            return CitationInfo(style="author-date", keys=combined_keys)
 
     # Pick whichever style found more citations
     # Require numerical to have at least 3 hits to avoid noise from page/section numbers
@@ -234,11 +278,17 @@ def extract_bibliography_section(full_text: str) -> str | None:
     return bib_text.strip()
 
 
-def match_numerical_citations(citation_keys: set, bibliography_text: str) -> list[str]:
-    """Match numbered citations [N] against bibliography entries."""
-    # Split by [N] markers
+def match_numerical_citations(citation_keys: set, bibliography_text: str) -> dict:
+    """
+    Match numbered citations [N] against bibliography entries.
+    
+    Handles two common bibliography formats:
+      Format A: [N] Author, Title...    (square-bracket numbered)
+      Format B: N. Author, Title...     (period-numbered, e.g. Springer style)
+    """
     entries = {}
-    # Pattern: start of line with [N] 
+
+    # Strategy 1: Split by [N] markers
     parts = re.split(r'(?:\r?\n|^)\s*(?=\[\d+\])', bibliography_text)
     for part in parts:
         part = part.strip()
@@ -247,9 +297,23 @@ def match_numerical_citations(citation_keys: set, bibliography_text: str) -> lis
         m = re.match(r'\[(\d+)\]', part)
         if m:
             num = int(m.group(1))
-            # Don't overwrite the first match (real bibliography) with later appendix table matches
             if num not in entries:
                 entries[num] = part.strip()
+
+    # Strategy 2: If [N] matching found very few, try N. format
+    # (e.g., "1. Bahel, V., Sriram, H...")
+    if len(entries) < len(citation_keys) // 2:
+        # Split on lines starting with a number followed by a period
+        dot_parts = re.split(r'(?:\r?\n)\s*(?=\d+\.\s)', bibliography_text)
+        for part in dot_parts:
+            part = part.strip()
+            if not part:
+                continue
+            m = re.match(r'(\d+)\.\s', part)
+            if m:
+                num = int(m.group(1))
+                if num not in entries:
+                    entries[num] = part.strip()
 
     matched = {}
     for key in sorted(citation_keys):

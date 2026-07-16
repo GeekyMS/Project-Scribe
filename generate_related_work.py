@@ -2,7 +2,7 @@
 Project Scribe Phase 2 — Related Works Generation & Evaluation.
 
 Usage:
-    # Full pipeline: generate + evaluate
+    # Full pipeline: generate + evaluate + questionnaires
     python generate_related_work.py --paper outputs/paper_without_related.md \\
                                      --bib outputs/references.bib \\
                                      --ground-truth outputs/related_work.txt
@@ -25,10 +25,10 @@ Usage:
                                      --paper outputs/paper_without_related.md \\
                                      --bib outputs/references.bib
 
-    # Generate human evaluation questionnaires
+    # Generate HTML questionnaires only (for tester distribution)
     python generate_related_work.py --eval-only outputs/generation/generated_related_work.md \\
                                      --ground-truth outputs/related_work.txt \\
-                                     --human-eval
+                                     --questionnaire --paper-title "My Paper"
 
 Outputs (in ./outputs/generation/):
     - generated_related_work_<model>.tex   — LaTeX with \\cite{} commands
@@ -39,10 +39,13 @@ Outputs (in ./outputs/generation/):
     - prompt_manual_web_llm.txt            — Prompt for copy-paste into web LLMs
     - generation_log_<model>.json          — Token usage, timing, metadata
     - enrichment_cache.json                — Cached Semantic Scholar abstracts
-    - human_eval_blind_ab.md               — Blind A/B questionnaire
-    - human_eval_likert.md                 — Likert scoring form
+    - human_eval_blind_ab.md               — Blind A/B questionnaire (Markdown, legacy)
+    - human_eval_likert.md                 — Likert scoring form (Markdown, legacy)
     - human_eval_schema.json               — JSON schema for responses
     - ground_truth.txt                     — Copy of original for comparison
+    - questionnaire_revealed.html          — Polished HTML form: AI text shown, author knows which
+    - questionnaire_blind.html             — Polished HTML form: blind A/B, randomised order
+    - questionnaire_blind_mapping.json     — A/B key (DO NOT share with evaluator until after)
 """
 
 import sys
@@ -52,6 +55,7 @@ from pathlib import Path
 from pipeline.generator import generate_related_work, DEFAULT_MODEL
 from pipeline.evaluator import run_evaluation
 from pipeline.human_eval import generate_human_eval_materials
+from pipeline.questionnaire_generator import generate_questionnaires
 
 
 def main():
@@ -115,7 +119,17 @@ def main():
     parser.add_argument(
         "--human-eval",
         action="store_true",
-        help="Generate human evaluation questionnaires (blind A/B + Likert).",
+        help="Generate legacy Markdown human evaluation questionnaires (blind A/B + Likert).",
+    )
+    parser.add_argument(
+        "--questionnaire",
+        action="store_true",
+        help="Generate polished HTML questionnaires for tester distribution (revealed + blind versions).",
+    )
+    parser.add_argument(
+        "--paper-title",
+        default="",
+        help="Paper title to display on questionnaire cover page.",
     )
     parser.add_argument(
         "--no-judge",
@@ -126,6 +140,11 @@ def main():
         "--no-similarity",
         action="store_true",
         help="Skip Tier 3 text similarity metrics (ROUGE/BERTScore).",
+    )
+    parser.add_argument(
+        "--no-argumentation",
+        action="store_true",
+        help="Skip Tier 2B/2C argumentative and coherence metrics (saves API tokens).",
     )
     
     args = parser.parse_args()
@@ -161,6 +180,7 @@ def main():
                 bib_path=args.bib,
                 model_name="manual_eval",
                 run_judge=not args.no_judge,
+                run_argumentation=not args.no_argumentation,
                 run_similarity=not args.no_similarity,
                 outputs_dir=outputs_dir,
             )
@@ -172,7 +192,16 @@ def main():
                 model_name="manual_eval",
                 outputs_dir=outputs_dir,
             )
-        
+
+        if args.questionnaire:
+            generate_questionnaires(
+                generated_text=generated_text,
+                ground_truth=ground_truth,
+                model_name="manual_eval",
+                paper_title=getattr(args, "paper_title", ""),
+                outputs_dir=outputs_dir,
+            )
+
         return
     
     # ── Mode: Full Pipeline (Generate + Evaluate) ──
@@ -225,6 +254,7 @@ def main():
                 bib_path=args.bib,
                 model_name=model,
                 run_judge=not args.no_judge,
+                run_argumentation=not args.no_argumentation,
                 run_similarity=not args.no_similarity,
                 outputs_dir=outputs_dir,
             )
@@ -236,6 +266,15 @@ def main():
                     model_name=model,
                     outputs_dir=outputs_dir,
                 )
+
+            # Always generate HTML questionnaires when ground truth is available
+            generate_questionnaires(
+                generated_text=generated_text,
+                ground_truth=ground_truth,
+                model_name=model,
+                paper_title=getattr(args, "paper_title", ""),
+                outputs_dir=outputs_dir,
+            )
         else:
             print(f"\n   ℹ️ No --ground-truth provided — skipping evaluation")
     

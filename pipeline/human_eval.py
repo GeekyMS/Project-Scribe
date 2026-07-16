@@ -158,6 +158,23 @@ Are there any specific citations or passages where one version is notably better
 
 **Answer:** ___
 
+### 9. Argument Case
+Which version better builds a case for *why the current paper needs to exist*? That is, after reading the Related Works, which version makes you better understand the gap in the literature that this paper fills?
+
+**Answer:** ___
+
+**Brief explanation:** ___
+
+### 10. Citation Argumentation
+In which version do the citations feel like they are *advancing an argument* (e.g., contrasting approaches, establishing gaps, building a foundation) vs. *just listing related work*?
+
+**Answer:** ___
+
+### 11. Argumentative Progression
+Which version better follows a logical argumentative progression — starting from broad context, narrowing to specific sub-problems, identifying gaps, and positioning the current paper?
+
+**Answer:** ___
+
 ---
 
 *Thank you for your evaluation. Please save this file with your responses and return it to the researcher.*
@@ -279,24 +296,70 @@ Would this pass peer review as a Related Works section?
 
 ---
 
+### 8. Argumentative Role Fidelity (1-5)
+For each major citation, does the generated text use it for the **same rhetorical purpose** as the original? For example, if the original cites a paper to *contrast against*, does the generated version also contrast against it — or does it describe the paper generically?
+
+| 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| Completely different roles | Most roles differ | Some match, some differ | Minor differences only | Same argumentative roles |
+
+**Score:** ___
+
+**Comments (please identify specific citations where the role changed):** ___
+
+### 9. Citation Relevance Precision (1-5)
+When the generated text describes a cited paper, does it highlight the aspect that is most relevant to **this paper's argument**, or does it give a generic description of what the cited paper does?
+
+| 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| All generic descriptions | Mostly generic | Mixed | Mostly relevant | Every description is precisely relevant |
+
+**Score:** ___
+
+**Comments:** ___
+
+### 10. Argument Alignment (1-5)
+After reading the generated Related Works, do you understand **why this paper needs to exist**? Does the section build a clear case that connects the cited works to the paper's core challenges and contributions?
+
+| 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| No connection to paper's goals | Weak connection | Some connection | Good connection | Clear, compelling case |
+
+**Score:** ___
+
+**Comments:** ___
+
+### 11. Argumentative Progression (1-5)
+Does the section build a logical argument, progressing from broad context → specific sub-problems → gaps in existing work → why this paper's approach is necessary?
+
+| 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|
+| Flat list, no progression | Weak structure | Some structure | Good progression | Clear, compelling arc |
+
+**Score:** ___
+
+**Comments:** ___
+
+---
+
 ## Open-Ended Questions
 
-### 8. Better or Worse References?
+### 12. Better or Worse References?
 Is any reference presented in a way that is **better** or **worse** than your original? Please identify specific examples and explain.
 
 **Answer:** ___
 
-### 9. Usability
+### 13. Usability
 Would you use this generated section as a starting draft? What would you change?
 
 **Answer:** ___
 
-### 10. Missing Context
+### 14. Missing Context
 Is there important context or nuance about any of the cited papers that the generated section misses?
 
 **Answer:** ___
 
-### 11. Additional Comments
+### 15. Additional Comments
 Any other observations about the quality of the generated Related Works section?
 
 **Answer:** ___
@@ -328,8 +391,16 @@ def _generate_response_schema(outputs_dir: Path) -> Path:
                 "reasoning": {"type": "string"},
             },
             "specific_observations": {"type": "string"},
+            # New argumentative dimensions
+            "argument_case": {
+                "preference": {"type": "string", "enum": ["A", "B", "Tie"]},
+                "explanation": {"type": "string"},
+            },
+            "citation_argumentation": {"type": "string", "enum": ["A", "B", "Tie"]},
+            "argumentative_progression": {"type": "string", "enum": ["A", "B", "Tie"]},
         },
         "protocol_b_likert": {
+            # Original 7 dimensions
             "citation_accuracy": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
             "coverage": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
             "framing_positioning": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
@@ -337,6 +408,12 @@ def _generate_response_schema(outputs_dir: Path) -> Path:
             "flow_coherence": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
             "organization": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
             "overall_quality": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            # New argumentative dimensions
+            "argumentative_role_fidelity": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            "citation_relevance_precision": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            "argument_alignment": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            "argumentative_progression": {"score": {"type": "integer", "min": 1, "max": 5}, "comments": {"type": "string"}},
+            # Open-ended
             "better_worse_references": {"type": "string"},
             "usability": {"type": "string"},
             "missing_context": {"type": "string"},

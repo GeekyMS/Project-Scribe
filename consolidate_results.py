@@ -39,6 +39,8 @@ def load_evaluation(paper_id: int, base_dir: str = "test_outputs") -> dict | Non
         "model": data.get("model", "unknown"),
         "tier_1": data.get("tier_1_citation_metrics", {}),
         "tier_2": data.get("tier_2_judge_scores", {}),
+        "tier_2b": data.get("tier_2b_argumentative_roles", {}),
+        "tier_2c": data.get("tier_2c_coherence", {}),
         "tier_3": data.get("tier_3_text_similarity", {}),
         "structural": data.get("structural_stats", {}),
         "gen_log": gen_log,
@@ -211,6 +213,95 @@ def generate_report(results: list[dict], output_dir: str = "test_outputs") -> st
     lines.append(f"5. **Structure**: Model consistently adds subsections and better organization vs. original")
     lines.append("")
     
+    # ── Argumentative Metrics (Tier 2B + 2C) ──
+    has_argumentation = any(r.get("tier_2b", {}).get("total_citations_analyzed", 0) > 0 for r in results)
+    
+    if has_argumentation:
+        lines.append("## Argumentative Metrics")
+        lines.append("")
+        lines.append("### Per-Citation Analysis (Tier 2B)")
+        lines.append("")
+        lines.append("| Paper | Role Match | Emphasis Match | Role JSD | "
+                     "Exact/Adj/Mis | Precise/Partial/Generic |")
+        lines.append("|-------|------------|----------------|----------|" 
+                     "---------------|-------------------------|")
+        
+        total_role = 0
+        total_emphasis = 0
+        total_jsd = 0
+        count_2b = 0
+        
+        for r in results:
+            t2b = r.get("tier_2b", {})
+            if t2b.get("total_citations_analyzed", 0) > 0:
+                role = t2b.get("role_match_score", 0)
+                emphasis = t2b.get("emphasis_match_score", 0)
+                jsd = t2b.get("role_distribution_divergence", 0)
+                exact = t2b.get("exact_role_matches", 0)
+                adj = t2b.get("adjacent_role_matches", 0)
+                mis = t2b.get("role_mismatches", 0)
+                precise = t2b.get("precise_emphasis", 0)
+                partial = t2b.get("partial_emphasis", 0)
+                generic = t2b.get("generic_emphasis", 0)
+                
+                total_role += role
+                total_emphasis += emphasis
+                total_jsd += jsd
+                count_2b += 1
+                
+                lines.append(
+                    f"| {r['paper_id']} | {role:.2f} | {emphasis:.2f} | "
+                    f"{jsd:.3f} | {exact}/{adj}/{mis} | "
+                    f"{precise}/{partial}/{generic} |"
+                )
+        
+        if count_2b > 0:
+            lines.append(
+                f"| **Avg** | **{total_role/count_2b:.2f}** | "
+                f"**{total_emphasis/count_2b:.2f}** | "
+                f"**{total_jsd/count_2b:.3f}** | — | — |"
+            )
+        lines.append("")
+        
+        lines.append("### Section-Level Coherence (Tier 2C)")
+        lines.append("")
+        lines.append("| Paper | Challenges | Align Coverage | Align Relevance | "
+                     "Align F1 | Arc Score |")
+        lines.append("|-------|------------|----------------|-----------------|" 
+                     "----------|-----------|")
+        
+        total_f1 = 0
+        total_arc = 0
+        count_2c = 0
+        
+        for r in results:
+            t2c = r.get("tier_2c", {})
+            challenges = t2c.get("challenges", [])
+            gen_align = t2c.get("alignment_scores", {}).get("generated", {})
+            gen_arc = t2c.get("narrative_arc_scores", {}).get("generated", {})
+            
+            if challenges:
+                coverage = gen_align.get("challenge_coverage", 0)
+                relevance = gen_align.get("citation_relevance", 0)
+                f1 = gen_align.get("alignment_f1", 0)
+                arc = gen_arc.get("composite_arc_score", 0)
+                
+                total_f1 += f1
+                total_arc += arc
+                count_2c += 1
+                
+                lines.append(
+                    f"| {r['paper_id']} | {len(challenges)} | {coverage:.2f} | "
+                    f"{relevance:.2f} | {f1:.2f} | {arc:.2f} |"
+                )
+        
+        if count_2c > 0:
+            lines.append(
+                f"| **Avg** | — | — | — | "
+                f"**{total_f1/count_2c:.2f}** | **{total_arc/count_2c:.2f}** |"
+            )
+        lines.append("")
+    
     # ── Strengths & Weaknesses (aggregated from judge) ──
     lines.append("## Aggregated Strengths & Weaknesses")
     lines.append("")
@@ -242,6 +333,14 @@ def generate_report(results: list[dict], output_dir: str = "test_outputs") -> st
             "paper_id", "model", "recall", "precision", "hallucinated", "missing",
             "judge_avg", "citation_accuracy", "coverage", "positioning", "depth",
             "flow", "organization", "overall_quality", "leakage_severity",
+            # New argumentative metrics
+            "role_match_score", "emphasis_match_score", "role_jsd",
+            "exact_roles", "adjacent_roles", "role_mismatches",
+            "precise_emphasis", "partial_emphasis", "generic_emphasis",
+            "challenge_count", "alignment_coverage", "alignment_relevance",
+            "alignment_f1", "arc_presence", "arc_ordering",
+            "arc_balance", "arc_composite",
+            # Existing structural + token metrics
             "length_ratio", "word_count_ratio", "gen_words", "gt_words",
             "gen_paragraphs", "gt_paragraphs", "gen_subsections",
             "prompt_tokens", "completion_tokens", "total_tokens", "generation_time_s",
@@ -249,11 +348,17 @@ def generate_report(results: list[dict], output_dir: str = "test_outputs") -> st
         for r in results:
             t1 = r["tier_1"]
             t2 = r["tier_2"]
+            t2b = r.get("tier_2b", {})
+            t2c = r.get("tier_2c", {})
             t3 = r["tier_3"]
             ss = r["structural"]
             gl = r["gen_log"]
             scores = t2.get("scores", {})
             avg = sum(scores.values()) / len(scores) if scores else 0
+            
+            gen_align = t2c.get("alignment_scores", {}).get("generated", {})
+            gen_arc = t2c.get("narrative_arc_scores", {}).get("generated", {})
+            
             writer.writerow([
                 r["paper_id"], r["model"],
                 t1.get("recall", 0), t1.get("precision", 0),
@@ -264,6 +369,26 @@ def generate_report(results: list[dict], output_dir: str = "test_outputs") -> st
                 scores.get("flow", ""), scores.get("organization", ""),
                 scores.get("overall_quality", ""),
                 t2.get("knowledge_leakage", {}).get("severity", ""),
+                # Argumentative role metrics
+                t2b.get("role_match_score", ""),
+                t2b.get("emphasis_match_score", ""),
+                t2b.get("role_distribution_divergence", ""),
+                t2b.get("exact_role_matches", ""),
+                t2b.get("adjacent_role_matches", ""),
+                t2b.get("role_mismatches", ""),
+                t2b.get("precise_emphasis", ""),
+                t2b.get("partial_emphasis", ""),
+                t2b.get("generic_emphasis", ""),
+                # Coherence metrics
+                len(t2c.get("challenges", [])),
+                gen_align.get("challenge_coverage", ""),
+                gen_align.get("citation_relevance", ""),
+                gen_align.get("alignment_f1", ""),
+                gen_arc.get("presence_score", ""),
+                gen_arc.get("ordering_score", ""),
+                gen_arc.get("balance_score", ""),
+                gen_arc.get("composite_arc_score", ""),
+                # Structural + tokens
                 t3.get("length_ratio", 0),
                 ss.get("ratios", {}).get("word_count_ratio", 0),
                 ss.get("generated", {}).get("word_count", 0),
