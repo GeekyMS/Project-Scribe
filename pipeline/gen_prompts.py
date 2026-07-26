@@ -31,6 +31,7 @@ def build_generation_prompt(
             year = entry.get("year", "")
             venue = entry.get("booktitle", "") or entry.get("journal", "") or ""
             abstract = entry.get("abstract", "")
+            full_text = entry.get("full_text", "")
             
             part = f"### [{key}]\n"
             part += f"**Title:** {title}\n"
@@ -39,7 +40,10 @@ def build_generation_prompt(
                 part += f"**Year:** {year}\n"
             if venue:
                 part += f"**Venue:** {venue}\n"
-            if abstract:
+                
+            if full_text:
+                part += f"**Full Text:**\n<full_text>\n{full_text}\n</full_text>\n"
+            elif abstract:
                 part += f"**Abstract:** {abstract}\n"
             else:
                 part += f"**Abstract:** Not available\n"

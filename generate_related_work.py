@@ -92,6 +92,11 @@ def main():
         help="Skip Semantic Scholar abstract enrichment (default: enrich is ON)",
     )
     parser.add_argument(
+        "--full-context",
+        action="store_true",
+        help="Experimental: Fetch full texts of cited papers to overload the context window.",
+    )
+    parser.add_argument(
         "--format",
         choices=["latex", "markdown", "both"],
         default="both",
@@ -157,7 +162,7 @@ def main():
             print("❌ --export-prompt requires --paper and --bib")
             sys.exit(1)
         
-        _export_prompt_only(args.paper, args.bib, args.no_enrich, outputs_dir)
+        _export_prompt_only(args.paper, args.bib, args.no_enrich, args.full_context, outputs_dir)
         return
     
     # ── Mode: Eval Only ──
@@ -234,6 +239,7 @@ def main():
             model=model,
             output_format=args.format,
             enrich=not args.no_enrich,
+            full_context=args.full_context,
             outputs_dir=outputs_dir,
         )
         
@@ -283,9 +289,10 @@ def main():
     print(f"{'='*60}\n")
 
 
-def _export_prompt_only(paper_path, bib_path, no_enrich, outputs_dir):
+def _export_prompt_only(paper_path, bib_path, no_enrich, full_context, outputs_dir):
     """Export prompt files without making any API calls."""
     from pipeline.abstract_fetcher import enrich_bib_entries
+    from pipeline.full_text_fetcher import fetch_and_extract_full_texts
     from pipeline.gen_prompts import build_generation_prompt, build_manual_prompt
     
     outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -294,7 +301,10 @@ def _export_prompt_only(paper_path, bib_path, no_enrich, outputs_dir):
     bib_content = Path(bib_path).read_text(encoding="utf-8")
     
     enriched_entries = None
-    if not no_enrich:
+    if full_context:
+        cache_path = outputs_dir / "full_text_cache.json"
+        enriched_entries = fetch_and_extract_full_texts(bib_path, cache_path=cache_path)
+    elif not no_enrich:
         cache_path = outputs_dir / "enrichment_cache.json"
         enriched_entries = enrich_bib_entries(bib_path, cache_path=cache_path)
     

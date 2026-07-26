@@ -20,6 +20,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from .abstract_fetcher import enrich_bib_entries, parse_bib_file
+from .full_text_fetcher import fetch_and_extract_full_texts
 from .gen_prompts import build_generation_prompt, build_manual_prompt
 
 load_dotenv()
@@ -115,6 +116,7 @@ def generate_related_work(
     model: str = DEFAULT_MODEL,
     output_format: str = "both",
     enrich: bool = True,
+    full_context: bool = False,
     outputs_dir: str | Path = "outputs/generation",
 ) -> GenerationResult:
     """
@@ -153,7 +155,11 @@ def generate_related_work(
     
     # ── Enrich references ──
     enriched_entries = None
-    if enrich:
+    if full_context:
+        cache_path = outputs_dir / "full_text_cache.json"
+        enriched_entries = fetch_and_extract_full_texts(bib_path, cache_path=cache_path)
+        result.enriched_entries = enriched_entries
+    elif enrich:
         cache_path = outputs_dir / "enrichment_cache.json"
         enriched_entries = enrich_bib_entries(bib_path, cache_path=cache_path)
         result.enriched_entries = enriched_entries
