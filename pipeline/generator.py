@@ -118,6 +118,7 @@ def generate_related_work(
     enrich: bool = True,
     full_context: bool = False,
     outputs_dir: str | Path = "outputs/generation",
+    target_word_count: int | None = None,
 ) -> GenerationResult:
     """
     Generate a Related Works section using an LLM.
@@ -128,7 +129,9 @@ def generate_related_work(
         model: OpenRouter model identifier.
         output_format: "latex", "markdown", or "both".
         enrich: Whether to fetch abstracts from Semantic Scholar (default: True).
+        full_context: Fetch full texts of cited papers.
         outputs_dir: Directory for output files.
+        target_word_count: Optional target word count for length matching.
     
     Returns:
         GenerationResult with the generated text, token usage, and timing.
@@ -146,6 +149,8 @@ def generate_related_work(
     print(f"   Model: {model}")
     print(f"   Format: {output_format}")
     print(f"   Enrich: {enrich}")
+    if target_word_count:
+        print(f"   📏 Target length: ~{target_word_count:,} words")
     
     # ── Load inputs ──
     paper_text = paper_md_path.read_text(encoding="utf-8")
@@ -170,6 +175,7 @@ def generate_related_work(
         bib_content=bib_content,
         enriched_entries=enriched_entries,
         output_format=output_format,
+        target_word_count=target_word_count,
     )
     result.prompt = prompt
     print(f"   Prompt length: {len(prompt)} chars (~{len(prompt)//4} tokens)")
@@ -184,6 +190,7 @@ def generate_related_work(
         paper_text=paper_text,
         bib_content=bib_content,
         enriched_entries=enriched_entries,
+        target_word_count=target_word_count,
     )
     manual_path = outputs_dir / "prompt_manual_web_llm.txt"
     manual_path.write_text(manual_prompt, encoding="utf-8")
@@ -264,6 +271,7 @@ def generate_related_work(
     log_data["prompt_length_chars"] = len(prompt)
     log_data["paper_text_length"] = len(paper_text)
     log_data["bib_entry_count"] = len(enriched_entries) if enriched_entries else len(parse_bib_file(bib_path))
+    log_data["target_word_count"] = target_word_count
     
     log_path = outputs_dir / f"generation_log_{model_short}.json"
     log_path.write_text(

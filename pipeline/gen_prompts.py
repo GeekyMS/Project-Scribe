@@ -5,11 +5,24 @@ Separate from pipeline/prompts.py (which handles Phase 1 extraction).
 """
 
 
+def _build_length_constraint(target_word_count: int | None) -> str:
+    """Return a length-guideline line for the generation prompt, or empty string."""
+    if not target_word_count:
+        return ""
+    return (
+        f"7. LENGTH GUIDELINE: The original Related Works section was approximately "
+        f"{target_word_count} words. Write a section of similar length (within ±15%). "
+        f"Do NOT pad with filler or cut important content to hit this target — "
+        f"the primary goal is natural, comprehensive coverage at a comparable scale."
+    )
+
+
 def build_generation_prompt(
     paper_text: str,
     bib_content: str,
     enriched_entries: list[dict] | None = None,
     output_format: str = "both",
+    target_word_count: int | None = None,
 ) -> str:
     """
     Build the Related Works generation prompt.
@@ -19,6 +32,7 @@ def build_generation_prompt(
         bib_content: Raw .bib file content.
         enriched_entries: Optional enriched bib entries with abstracts.
         output_format: "latex", "markdown", or "both".
+        target_word_count: Optional target word count for length matching.
     """
     # Build the enriched references section if available
     references_section = ""
@@ -89,6 +103,7 @@ Write a comprehensive Related Works section for the paper described below. You m
 4. Organize the section thematically — group related papers into coherent subsections with clear transitions.
 5. Don't just list papers — explain how they relate to each other and to the current paper's approach.
 6. Be specific about what each cited work contributes and how it differs from or informs the current paper.
+{_build_length_constraint(target_word_count)}
 
 ## OUTPUT FORMAT
 {format_instructions}
@@ -120,6 +135,7 @@ def build_manual_prompt(
     paper_text: str,
     bib_content: str,
     enriched_entries: list[dict] | None = None,
+    target_word_count: int | None = None,
 ) -> str:
     """
     Build a prompt formatted for manual use in web-based LLMs.
@@ -148,13 +164,23 @@ def build_manual_prompt(
     else:
         references_section = bib_content
 
+    # Build length instruction for manual prompt
+    length_rule = ""
+    if target_word_count:
+        length_rule = (
+            f"\n- LENGTH GUIDELINE: The original Related Works section was approximately "
+            f"{target_word_count} words. Write a section of similar length (within ±15%). "
+            f"Do NOT pad with filler or cut important content to hit this target — "
+            f"the primary goal is natural, comprehensive coverage at a comparable scale."
+        )
+
     prompt = f"""I need you to write a Related Works section for an academic paper. 
 
 IMPORTANT RULES:
 - Cite ONLY the papers listed below. Do NOT cite any other papers.
 - Use author-date citation format, e.g., (Smith et al., 2021).
 - Organize the section thematically with clear subsections.
-- Be specific about what each paper contributes and how it relates to the current paper.
+- Be specific about what each paper contributes and how it relates to the current paper.{length_rule}
 
 THE PAPER (with Related Works removed):
 ---

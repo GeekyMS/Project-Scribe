@@ -151,6 +151,13 @@ def main():
         action="store_true",
         help="Skip Tier 2B/2C argumentative and coherence metrics (saves API tokens).",
     )
+    parser.add_argument(
+        "--target-words",
+        type=int,
+        default=None,
+        help="Target word count for generated Related Works. "
+             "Default: auto-computed from --ground-truth if provided.",
+    )
     
     args = parser.parse_args()
     
@@ -224,8 +231,16 @@ def main():
     
     models = args.models or [DEFAULT_MODEL]
     ground_truth = None
+    target_word_count = args.target_words  # explicit override takes priority
     if args.ground_truth:
         ground_truth = Path(args.ground_truth).read_text(encoding="utf-8")
+        # Auto-compute target word count from ground truth if not explicitly set
+        if target_word_count is None:
+            target_word_count = len(ground_truth.split())
+    
+    if target_word_count:
+        print(f"\n   📏 Target length: ~{target_word_count:,} words"
+              f"{' (from ground truth)' if not args.target_words else ' (user-specified)'}")
     
     # Run for each model
     for model in models:
@@ -241,6 +256,7 @@ def main():
             enrich=not args.no_enrich,
             full_context=args.full_context,
             outputs_dir=outputs_dir,
+            target_word_count=target_word_count,
         )
         
         # Use whichever output is available for evaluation
