@@ -160,6 +160,73 @@ def _map_norm_pos_to_original(original: str, normalized: str, norm_pos: int) -> 
     return len(original)
 
 
+def _strip_table_bleedin(text: str) -> str:
+    """
+    Remove markdown table blocks, page markers, and orphaned footnotes
+    that bleed into the extracted Related Work text from adjacent sections.
+
+    This handles a common Docling artifact: when a table (e.g., Table 4 from
+    a results section) sits physically near the Related Work section on the
+    same PDF page, Docling serializes them sequentially, causing the table
+    to appear inside the extracted text.
+
+    Strategy:
+    - Strip ALL markdown table lines (lines starting with ``|``) anywhere
+      in the text, plus their captions (``Table N: ...``) and separator
+      lines (``+---``).
+    - Strip ``--- PAGE N ---`` markers from Docling output.
+    - Strip orphaned footnotes (lines like ``14 We focus on...``).
+    - Related Work sections essentially never contain markdown tables,
+      so this is safe to apply universally.
+    """
+    import re
+
+    lines = text.split('\n')
+    cleaned = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Skip blank lines only if we haven't started real content yet
+        # (keep blank lines between real paragraphs)
+
+        # Skip markdown table rows
+        if stripped.startswith('|') and '|' in stripped[1:]:
+            continue
+
+        # Skip table separator lines (e.g., +------+------+)
+        if stripped.startswith('+-') and stripped.endswith('-+'):
+            continue
+
+        # Skip table captions (e.g., "Table 4: Taxonomy of common...")
+        if re.match(r'^Table\s+\d+[:\s]', stripped, re.IGNORECASE):
+            continue
+
+        # Skip Docling page markers (e.g., "--- PAGE 9 ---")
+        if re.match(r'^---\s*PAGE\s+\d+\s*---$', stripped, re.IGNORECASE):
+            continue
+
+        # Skip orphaned footnotes that bleed in from adjacent sections
+        # Pattern: line starts with a number followed by text (e.g., "14 We focus on...")
+        # but NOT numbered list items or section headings like "6.1 Realistic..."
+        if re.match(r'^\d+\s+[A-Z][a-z]', stripped) and not re.match(r'^\d+\.\d+\s', stripped):
+            # Only strip if it's short-ish (footnotes are typically 1-2 lines)
+            # and doesn't look like a section heading
+            if len(stripped) < 200 and not stripped.startswith('#'):
+                continue
+
+        cleaned.append(line)
+
+    result = '\n'.join(cleaned).strip()
+
+    n_stripped = len(lines) - len(cleaned)
+    if n_stripped > 0 and result:
+        print(f"   🧹 Stripped {n_stripped} table/footnote/marker bleed-in lines from extracted text")
+        return result
+
+    return text
+
+
 def run_extraction_gate(
     pdf_path: str,
     boundaries: Boundaries,
@@ -261,13 +328,23 @@ def run_extraction_gate(
         status = "error"
 
     # ------------------------------------------------------------------
-    # Extract text — prefer PyMuPDF coordinate extraction, fall back to
-    # full_text string slicing
+    # Extract text — prefer Docling full_text (has markdown formatting
+    # that enables table-bleed-in stripping) over PyMuPDF plain text.
+    # PyMuPDF is still used above for coordinate-level snippet validation.
     # ------------------------------------------------------------------
     extracted_text = None
     if status in ("success", "partial"):
-        # Try PyMuPDF coordinate-based extraction first
-        if start_found or end_found:
+        # Prefer Docling/pre-extracted full_text when available — it
+        # preserves markdown table formatting (|...|) that allows
+        # _strip_table_bleedin to cleanly remove tables from adjacent
+        # sections that bleed into the extraction.
+        if full_text:
+            extracted_text = _trim_to_snippets(
+                full_text, boundaries.start_snippet, boundaries.end_snippet
+            )
+
+        # Fall back to PyMuPDF coordinate-based extraction
+        if not extracted_text and (start_found or end_found):
             extract_start = actual_start_page if start_found else start_page_idx
             extract_end = actual_end_page if end_found else end_page_idx
 
@@ -286,11 +363,9 @@ def run_extraction_gate(
             if not extracted_text:
                 extracted_text = full_page_text
 
-        # Fall back to full_text string extraction if PyMuPDF didn't work
-        if not extracted_text and full_text:
-            extracted_text = _trim_to_snippets(
-                full_text, boundaries.start_snippet, boundaries.end_snippet
-            )
+        # ── Post-processing: strip table bleed-in ──
+        if extracted_text:
+            extracted_text = _strip_table_bleedin(extracted_text)
 
         if not extracted_text:
             status = "error"

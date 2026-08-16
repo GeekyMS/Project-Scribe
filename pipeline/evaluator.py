@@ -136,6 +136,7 @@ class ArgumentativeRoleScores:
     role_match_score: float = 0.0       # Metric 1: avg match across citations
     emphasis_match_score: float = 0.0   # Metric 2: avg emphasis match
     role_distribution_divergence: float = 0.0  # JSD between role distributions
+    alignment_coverage: float = 0.0     # Fraction of generated citations aligned to original
 
     # Counts for transparency
     total_citations_analyzed: int = 0
@@ -159,6 +160,7 @@ class ArgumentativeRoleScores:
             "role_match_score": round(self.role_match_score, 4),
             "emphasis_match_score": round(self.emphasis_match_score, 4),
             "role_distribution_divergence": round(self.role_distribution_divergence, 4),
+            "alignment_coverage": round(self.alignment_coverage, 4),
             "total_citations_analyzed": self.total_citations_analyzed,
             "exact_role_matches": self.exact_role_matches,
             "adjacent_role_matches": self.adjacent_role_matches,
@@ -490,7 +492,13 @@ def evaluate_argumentative_roles(
 
                 # ── Compute Metric 1: Role Match Score ──
                 role_scores = []
+                generated_citations_count = 0
+                
                 for key, info in result.citation_roles.items():
+                    gen_role = info.get("generated_role", "ABSENT")
+                    if gen_role != "ABSENT":
+                        generated_citations_count += 1
+                        
                     match_type = info.get("role_match", "mismatch")
                     if match_type == "exact":
                         role_scores.append(1.0)
@@ -508,6 +516,9 @@ def evaluate_argumentative_roles(
                 result.total_citations_analyzed = len(result.citation_roles)
                 if role_scores:
                     result.role_match_score = sum(role_scores) / len(role_scores)
+                
+                if generated_citations_count > 0:
+                    result.alignment_coverage = len(role_scores) / generated_citations_count
 
                 # ── Compute Metric 2: Emphasis Match Score ──
                 emphasis_scores = []
@@ -538,6 +549,8 @@ def evaluate_argumentative_roles(
 
                 # Print results
                 print(f"   ✅ Argumentative Role Analysis complete")
+                print(f"      Alignment Coverage: {result.alignment_coverage:.2f} "
+                      f"(aligned={len(role_scores)}, total_generated={generated_citations_count})")
                 print(f"      Role Match Score: {result.role_match_score:.2f} "
                       f"(exact={result.exact_role_matches}, "
                       f"adjacent={result.adjacent_role_matches}, "
@@ -945,6 +958,7 @@ def _save_side_by_side(
     
     # Argumentative Role metrics
     if ar.total_citations_analyzed > 0:
+        doc += f"| **Alignment Coverage** | **{ar.alignment_coverage:.2f}** |\n"
         doc += f"| **Role Match Score** | **{ar.role_match_score:.2f}** |\n"
         doc += f"| **Emphasis Match Score** | **{ar.emphasis_match_score:.2f}** |\n"
         doc += f"| Role Distribution JSD | {ar.role_distribution_divergence:.3f} |\n"

@@ -393,6 +393,93 @@ def _find_last_rect(page, snippet: str):
     return None
 
 
+def _is_two_column(page):
+    """Heuristic to check if page uses a two-column layout.
+    
+    Counts text blocks that fall clearly in the left or right half.
+    Also counts blocks that span the column gap (tables, wide captions)
+    as supporting evidence rather than disqualifying the page.
+    """
+    blocks = page.get_text("blocks")
+    mid_x = page.rect.width / 2
+    left_blocks = 0
+    right_blocks = 0
+    full_width_blocks = 0
+    
+    for b in blocks:
+        if b[6] != 0:  # not text
+            continue
+        width = b[2] - b[0]
+        if width > page.rect.width * 0.7:
+            full_width_blocks += 1
+        elif b[2] <= mid_x + 20: 
+            left_blocks += 1
+        elif b[0] >= mid_x - 20: 
+            right_blocks += 1
+    
+    # Need at least 2 blocks in each column; full-width blocks (tables,
+    # captions) are common in two-column papers and shouldn't disqualify.
+    return left_blocks >= 2 and right_blocks >= 2
+
+
+def _redact_before(page, rect, inclusive=False):
+    """Redact all content before rect in reading order.
+    
+    If inclusive=True, the rect itself is also redacted (use when
+    removing the related work section). If False, the rect is kept
+    (use when trimming non-related-work from related_work_only.pdf).
+    """
+    y_edge = rect.y1 if inclusive else rect.y0
+    if _is_two_column(page):
+        mid_x = page.rect.width / 2
+        if rect.x0 < mid_x:  # left column
+            page.add_redact_annot(fitz.Rect(0, 0, mid_x, y_edge), fill=(1, 1, 1))
+        else:  # right column
+            page.add_redact_annot(fitz.Rect(0, 0, mid_x, page.rect.height), fill=(1, 1, 1))
+            page.add_redact_annot(fitz.Rect(mid_x, 0, page.rect.width, y_edge), fill=(1, 1, 1))
+    else:
+        page.add_redact_annot(fitz.Rect(0, 0, page.rect.width, y_edge), fill=(1, 1, 1))
+
+
+def _redact_after(page, rect, inclusive=False):
+    """Redact all content after rect in reading order.
+    
+    If inclusive=True, the rect itself is also redacted.
+    """
+    y_edge = rect.y0 if inclusive else rect.y1
+    if _is_two_column(page):
+        mid_x = page.rect.width / 2
+        if rect.x1 < mid_x:  # left column
+            page.add_redact_annot(fitz.Rect(0, y_edge, mid_x, page.rect.height), fill=(1, 1, 1))
+            page.add_redact_annot(fitz.Rect(mid_x, 0, page.rect.width, page.rect.height), fill=(1, 1, 1))
+        else:  # right column
+            page.add_redact_annot(fitz.Rect(mid_x, y_edge, page.rect.width, page.rect.height), fill=(1, 1, 1))
+    else:
+        page.add_redact_annot(fitz.Rect(0, y_edge, page.rect.width, page.rect.height), fill=(1, 1, 1))
+
+
+def _redact_between(page, s_rect, e_rect):
+    """Redact all content between s_rect and e_rect in reading order."""
+    if _is_two_column(page):
+        mid_x = page.rect.width / 2
+        s_left = s_rect.x0 < mid_x
+        e_left = e_rect.x1 < mid_x
+        
+        if s_left and e_left:
+            page.add_redact_annot(fitz.Rect(0, s_rect.y0, mid_x, e_rect.y1), fill=(1, 1, 1))
+        elif s_left and not e_left:
+            page.add_redact_annot(fitz.Rect(0, s_rect.y0, mid_x, page.rect.height), fill=(1, 1, 1))
+            page.add_redact_annot(fitz.Rect(mid_x, 0, page.rect.width, e_rect.y1), fill=(1, 1, 1))
+        elif not s_left and not e_left:
+            page.add_redact_annot(fitz.Rect(mid_x, s_rect.y0, page.rect.width, e_rect.y1), fill=(1, 1, 1))
+        elif not s_left and e_left:
+            # Anomalous, but handle it safely
+            page.add_redact_annot(fitz.Rect(mid_x, s_rect.y0, page.rect.width, page.rect.height), fill=(1, 1, 1))
+            page.add_redact_annot(fitz.Rect(0, 0, mid_x, e_rect.y1), fill=(1, 1, 1))
+    else:
+        page.add_redact_annot(fitz.Rect(0, s_rect.y0, page.rect.width, e_rect.y1), fill=(1, 1, 1))
+
+
 def _pdf_hybrid_removal(pdf_path: str, boundaries: Boundaries, outputs_dir: Path):
     """
     Create related_work_only.pdf and paper_without_related.pdf.
@@ -425,18 +512,10 @@ def _pdf_hybrid_removal(pdf_path: str, boundaries: Boundaries, outputs_dir: Path
                 end_rect = _find_last_rect(related_doc[ep_idx], boundaries.end_snippet)
 
             if start_rect:
-                redact_rect = fitz.Rect(
-                    related_doc[sp_idx].rect.x0, related_doc[sp_idx].rect.y0,
-                    related_doc[sp_idx].rect.x1, start_rect.y0,
-                )
-                related_doc[sp_idx].add_redact_annot(redact_rect, fill=(1, 1, 1))
+                _redact_before(related_doc[sp_idx], start_rect)
 
             if end_rect:
-                redact_rect = fitz.Rect(
-                    related_doc[ep_idx].rect.x0, end_rect.y1,
-                    related_doc[ep_idx].rect.x1, related_doc[ep_idx].rect.y1,
-                )
-                related_doc[ep_idx].add_redact_annot(redact_rect, fill=(1, 1, 1))
+                _redact_after(related_doc[ep_idx], end_rect)
 
             for p in range(related_doc.page_count):
                 related_doc[p].apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
@@ -455,8 +534,7 @@ def _pdf_hybrid_removal(pdf_path: str, boundaries: Boundaries, outputs_dir: Path
             s_rect = _find_first_rect(page, boundaries.start_snippet)
             e_rect = _find_last_rect(page, boundaries.end_snippet)
             if s_rect and e_rect:
-                redact_rect = fitz.Rect(page.rect.x0, s_rect.y0, page.rect.x1, e_rect.y1)
-                page.add_redact_annot(redact_rect, fill=(1, 1, 1))
+                _redact_between(page, s_rect, e_rect)
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
             else:
                 doc2.delete_page(start_page - 1)
@@ -464,15 +542,13 @@ def _pdf_hybrid_removal(pdf_path: str, boundaries: Boundaries, outputs_dir: Path
             s_page = doc2[start_page - 1]
             s_rect = _find_first_rect(s_page, boundaries.start_snippet)
             if s_rect:
-                r = fitz.Rect(s_page.rect.x0, s_rect.y0, s_page.rect.x1, s_page.rect.y1)
-                s_page.add_redact_annot(r, fill=(1, 1, 1))
+                _redact_after(s_page, s_rect, inclusive=True)
                 s_page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
             e_page = doc2[end_page - 1]
             e_rect = _find_last_rect(e_page, boundaries.end_snippet)
             if e_rect:
-                r = fitz.Rect(e_page.rect.x0, e_page.rect.y0, e_page.rect.x1, e_rect.y1)
-                e_page.add_redact_annot(r, fill=(1, 1, 1))
+                _redact_before(e_page, e_rect, inclusive=True)
                 e_page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
             if end_page - start_page > 1:

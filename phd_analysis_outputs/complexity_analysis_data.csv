@@ -1,6 +1,0 @@
-paper_id,model,bib_entry_count,prompt_tokens,paper_length_words,citation_recall,citation_precision,role_match_score,emphasis_match_score,role_jsd,alignment_f1,narrative_arc_composite
-2503.07928v3,anthropic/claude-sonnet-4.6,0,19260,824,1.0,1.0,0.375,0.25,0.3968,0.8,0.57
-2601.23096v2,anthropic/claude-sonnet-4.6,0,43580,568,1.0,1.0,0.0,0.0,0.0,0.9677,0
-2604.05160v1,anthropic/claude-sonnet-4.6,0,13515,703,1.0,1.0,0.7917,0.8333,0.0638,1.0,1.0
-2605.30051v1,anthropic/claude-sonnet-4.6,0,22501,385,1.0,1.0,0.0,0.0,0.0,1.0,1.0
-Cross_Rubric_Generalization__CEUR_2026_ (2),anthropic/claude-sonnet-4.6,0,19390,416,1.0,1.0,0.8,0.55,0.0366,0.8,1.0

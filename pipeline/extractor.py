@@ -102,7 +102,13 @@ def _call_llm_single(
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 try:
-                    data = json.loads(match.group(0))
+                    # Use raw_decode to parse only the FIRST valid JSON object.
+                    # This handles the case where the model outputs two JSON
+                    # blocks (e.g., gives an answer, then "reconsiders" and
+                    # outputs a second one). The greedy regex captures both,
+                    # but raw_decode stops after the first complete object.
+                    decoder = json.JSONDecoder()
+                    data, _ = decoder.raw_decode(match.group(0))
                     print(f"   LLM Raw (attempt {attempt}): {raw[:300]}...")
 
                     # Normalize key variants
@@ -119,10 +125,12 @@ def _call_llm_single(
                         }
 
                     return data
-                except json.JSONDecodeError:
-                    print(f"   ⚠️ JSON parse failed on attempt {attempt}")
+                except (json.JSONDecodeError, ValueError) as e:
+                    print(f"   ⚠️ JSON parse failed on attempt {attempt}: {e}")
+                    print(f"   ⚠️ Raw response (first 500 chars): {raw[:500]}")
             else:
                 print(f"   ⚠️ No JSON found on attempt {attempt}")
+                print(f"   ⚠️ Raw response (first 500 chars): {raw[:500]}")
 
         except Exception as e:
             print(f"   ⚠️ LLM call failed on attempt {attempt}: {e}")

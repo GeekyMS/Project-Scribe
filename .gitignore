@@ -18,3 +18,8 @@ bib_test_results.csv
 2007.12061v3.pdf
 project_summary.md
 methodology.tex
+# Additional ignores requested by user
+*.pdf
+phd_analysis_outputs/
+METRICS_CONTRACT.md
+my_venv/
