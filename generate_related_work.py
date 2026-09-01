@@ -152,6 +152,19 @@ def main():
         help="Skip Tier 2B/2C argumentative and coherence metrics (saves API tokens).",
     )
     parser.add_argument(
+        "--no-evidence",
+        action="store_true",
+        help="Skip Tier 4 evidence-support evaluation (saves API tokens; "
+             "one judge call per ~8 citations).",
+    )
+    parser.add_argument(
+        "--refresh-enrichment",
+        action="store_true",
+        help="Re-resolve every bib entry via the retrieval cascade, ignoring "
+             "the enrichment cache (use after fixing/adding S2_API_KEY, "
+             "OPENALEX_API_KEY, or CONTACT_EMAIL in .env).",
+    )
+    parser.add_argument(
         "--target-words",
         type=int,
         default=None,
@@ -194,6 +207,7 @@ def main():
                 run_judge=not args.no_judge,
                 run_argumentation=not args.no_argumentation,
                 run_similarity=not args.no_similarity,
+                run_evidence=not args.no_evidence,
                 outputs_dir=outputs_dir,
             )
         
@@ -257,6 +271,7 @@ def main():
             full_context=args.full_context,
             outputs_dir=outputs_dir,
             target_word_count=target_word_count,
+            force_refresh_enrichment=args.refresh_enrichment,
         )
         
         # Use whichever output is available for evaluation
@@ -278,6 +293,8 @@ def main():
                 run_judge=not args.no_judge,
                 run_argumentation=not args.no_argumentation,
                 run_similarity=not args.no_similarity,
+                run_evidence=not args.no_evidence,
+                enriched_entries=gen_result.enriched_entries or None,
                 outputs_dir=outputs_dir,
             )
             

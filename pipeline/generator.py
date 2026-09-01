@@ -119,20 +119,24 @@ def generate_related_work(
     full_context: bool = False,
     outputs_dir: str | Path = "outputs/generation",
     target_word_count: int | None = None,
+    force_refresh_enrichment: bool = False,
 ) -> GenerationResult:
     """
     Generate a Related Works section using an LLM.
-    
+
     Args:
         paper_md_path: Path to the paper text (markdown) without Related Works.
         bib_path: Path to the .bib file with cited references.
         model: OpenRouter model identifier.
         output_format: "latex", "markdown", or "both".
-        enrich: Whether to fetch abstracts from Semantic Scholar (default: True).
+        enrich: Whether to fetch abstracts via the retrieval cascade
+            (default: True). See pipeline/resolvers.py.
         full_context: Fetch full texts of cited papers.
         outputs_dir: Directory for output files.
         target_word_count: Optional target word count for length matching.
-    
+        force_refresh_enrichment: Re-resolve every bib entry, ignoring
+            the enrichment cache (--refresh-enrichment).
+
     Returns:
         GenerationResult with the generated text, token usage, and timing.
     """
@@ -162,11 +166,15 @@ def generate_related_work(
     enriched_entries = None
     if full_context:
         cache_path = outputs_dir / "full_text_cache.json"
-        enriched_entries = fetch_and_extract_full_texts(bib_path, cache_path=cache_path)
+        enriched_entries = fetch_and_extract_full_texts(
+            bib_path, cache_path=cache_path, force_refresh=force_refresh_enrichment,
+        )
         result.enriched_entries = enriched_entries
     elif enrich:
         cache_path = outputs_dir / "enrichment_cache.json"
-        enriched_entries = enrich_bib_entries(bib_path, cache_path=cache_path)
+        enriched_entries = enrich_bib_entries(
+            bib_path, cache_path=cache_path, force_refresh=force_refresh_enrichment,
+        )
         result.enriched_entries = enriched_entries
     
     # ── Build prompt ──
