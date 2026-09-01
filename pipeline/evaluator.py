@@ -11,19 +11,27 @@ Multi-tier evaluation of generated Related Works sections:
 Also handles comparison across multiple models.
 """
 
+import hashlib
 import json
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .abstract_fetcher import parse_bib_file
+from .citation_spans import find_citation_spans
 from .gen_prompts import (
     build_judge_prompt,
     build_argumentative_role_prompt,
     build_coherence_prompt,
 )
 from .extractor import client, MAX_RETRIES, RETRY_DELAY
+
+# Bump when a change alters what existing report fields mean (not just
+# adds new ones) — e.g. the \citep/\citet citation-counting fix below.
+# Old and new reports should not be averaged/compared without checking this.
+REPORT_SCHEMA_VERSION = 2
 
 
 # Judge model — should differ from generation model to avoid self-evaluation bias
@@ -76,6 +84,9 @@ class JudgeScores:
     weaknesses: list[str] = field(default_factory=list)
     comparison_summary: str = ""
     judge_model: str = ""
+    prompt_hash: str = ""
+    decoding_params: dict = field(default_factory=dict)
+    timestamp: str = ""
     error: str | None = None
 
     def to_dict(self) -> dict:
@@ -87,6 +98,9 @@ class JudgeScores:
             "weaknesses": self.weaknesses,
             "comparison_summary": self.comparison_summary,
             "judge_model": self.judge_model,
+            "prompt_hash": self.prompt_hash,
+            "decoding_params": self.decoding_params,
+            "timestamp": self.timestamp,
             "error": self.error,
         }
 
@@ -150,6 +164,9 @@ class ArgumentativeRoleScores:
 
     summary: str = ""
     judge_model: str = ""
+    prompt_hash: str = ""
+    decoding_params: dict = field(default_factory=dict)
+    timestamp: str = ""
     error: str | None = None
 
     def to_dict(self) -> dict:
@@ -171,6 +188,9 @@ class ArgumentativeRoleScores:
             "generic_emphasis": self.generic_emphasis,
             "summary": self.summary,
             "judge_model": self.judge_model,
+            "prompt_hash": self.prompt_hash,
+            "decoding_params": self.decoding_params,
+            "timestamp": self.timestamp,
             "error": self.error,
         }
 
@@ -202,6 +222,9 @@ class CoherenceScores:
 
     summary: str = ""
     judge_model: str = ""
+    prompt_hash: str = ""
+    decoding_params: dict = field(default_factory=dict)
+    timestamp: str = ""
     error: str | None = None
 
     def to_dict(self) -> dict:
@@ -222,6 +245,9 @@ class CoherenceScores:
             },
             "summary": self.summary,
             "judge_model": self.judge_model,
+            "prompt_hash": self.prompt_hash,
+            "decoding_params": self.decoding_params,
+            "timestamp": self.timestamp,
             "error": self.error,
         }
 
@@ -241,6 +267,7 @@ class EvaluationReport:
 
     def to_dict(self) -> dict:
         return {
+            "report_schema_version": REPORT_SCHEMA_VERSION,
             "model": self.model,
             "tier_1_citation_metrics": self.citation_metrics.to_dict(),
             "tier_2_judge_scores": self.judge_scores.to_dict(),
@@ -249,6 +276,85 @@ class EvaluationReport:
             "tier_3_text_similarity": self.text_similarity.to_dict(),
             "structural_stats": self.structural_stats,
         }
+
+
+# ═════════════════════════════════════════════════════════════
+# Shared judge-call helper
+# ═════════════════════════════════════════════════════════════
+
+def _call_judge(
+    prompt: str,
+    *,
+    judge_model: str = JUDGE_MODEL,
+    timeout: float = 180.0,
+    max_retries: int = MAX_RETRIES,
+    label: str = "judge",
+    decoding_params: dict | None = None,
+) -> tuple[dict | None, dict]:
+    """
+    Shared call/retry/JSON-parse for LLM-as-judge tiers.
+
+    Factored out of the three copy-pasted blocks that used to live in
+    evaluate_with_judge, evaluate_argumentative_roles, and
+    evaluate_coherence. Behaviour is unchanged; this additionally
+    returns run provenance (prompt_hash, timestamp, attempts, latency)
+    per METRICS_CONTRACT.md §8.
+
+    Returns:
+        (parsed_json, meta) — parsed_json is None if every attempt
+        failed to produce valid JSON. meta always has a value for
+        every key below.
+    """
+    decoding_params = decoding_params or {"default": True}
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    meta = {
+        "judge_model": judge_model,
+        "prompt_hash": prompt_hash,
+        "decoding_params": decoding_params,
+        "attempts": 0,
+        "latency_s": 0.0,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "error": None,
+    }
+
+    call_start = time.time()
+    for attempt in range(1, max_retries + 1):
+        meta["attempts"] = attempt
+        try:
+            response = client.chat.completions.create(
+                model=judge_model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                timeout=timeout,
+            )
+
+            raw = response.choices[0].message.content
+            if raw is None:
+                print(f"   ⚠️ {label}: empty content on attempt {attempt}")
+                if attempt < max_retries:
+                    time.sleep(RETRY_DELAY)
+                continue
+
+            # Strip thinking tags (reasoning models)
+            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL)
+
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+                meta["latency_s"] = time.time() - call_start
+                return data, meta
+            else:
+                print(f"   ⚠️ {label}: no JSON found on attempt {attempt}")
+
+        except Exception as e:
+            print(f"   ⚠️ {label} call failed on attempt {attempt}: {e}")
+            meta["error"] = str(e)
+
+        if attempt < max_retries:
+            time.sleep(RETRY_DELAY)
+
+    meta["latency_s"] = time.time() - call_start
+    return None, meta
 
 
 # ═════════════════════════════════════════════════════════════
@@ -261,62 +367,60 @@ def evaluate_citations(
 ) -> CitationMetrics:
     """
     Tier 1: Deterministic citation analysis.
-    
+
     Checks:
     - Which bib keys were cited (recall)
     - Whether any hallucinated citations appear (precision)
     - Total citation instances
+
+    Note: citation extraction goes through find_citation_spans(), which
+    matches the full \\cite-family (\\citep, \\citet, \\citealp, ...),
+    not just bare \\cite{}. This changes total_citations relative to
+    report_schema_version 1 — see REPORT_SCHEMA_VERSION at the top of
+    this module.
     """
     bib_path = Path(bib_path)
     metrics = CitationMetrics()
-    
+
     # Get all valid bib keys
     entries = parse_bib_file(bib_path)
     metrics.bib_keys = sorted([e["key"] for e in entries])
     bib_key_set = set(metrics.bib_keys)
-    
-    # Extract cited keys from the generated text
-    cited_keys = set()
-    
-    # Pattern 1: LaTeX \cite{key} or \cite{key1, key2}
-    for match in re.finditer(r'\\cite\{([^}]+)\}', generated_text):
-        keys = [k.strip() for k in match.group(1).split(',')]
-        cited_keys.update(keys)
-    
-    # Pattern 2: Markdown <!-- CITATION_KEYS: key1, key2, ... -->
+
+    spans = find_citation_spans(generated_text, entries)
+
+    # Pattern 2 fallback: Markdown <!-- CITATION_KEYS: key1, key2, ... -->
+    # find_citation_spans already resolves author-date mentions when no
+    # \cite-family command is present; this comment block is a
+    # cross-check for keys the author-date regex may have missed.
     ck_match = re.search(r'<!--\s*CITATION_KEYS:\s*(.*?)\s*-->', generated_text)
+    ck_keys = set()
     if ck_match:
-        keys = [k.strip() for k in ck_match.group(1).split(',')]
-        cited_keys.update(k for k in keys if k)
-    
-    # Clean up empty strings
+        ck_keys = {k.strip() for k in ck_match.group(1).split(',') if k.strip()}
+
+    cited_keys = {s.key for s in spans} | ck_keys
     cited_keys.discard("")
-    
+
     metrics.cited_keys = sorted(cited_keys)
     metrics.hallucinated_keys = sorted(cited_keys - bib_key_set)
     metrics.missing_keys = sorted(bib_key_set - cited_keys)
-    
-    # Count total citation instances (not unique)
-    total = len(re.findall(r'\\cite\{[^}]+\}', generated_text))
-    if not total:
-        # Count author-date style citations
-        for key in cited_keys:
-            total += generated_text.count(key)
-    metrics.total_citations = total
-    
+
+    # Total citation instances (mentions, not unique keys)
+    metrics.total_citations = len(spans) if spans else len(ck_keys)
+
     # Compute precision and recall
     if cited_keys:
         valid_cited = cited_keys & bib_key_set
         metrics.precision = len(valid_cited) / len(cited_keys)
     else:
         metrics.precision = 1.0  # No citations = vacuously precise
-    
+
     if bib_key_set:
         cited_from_bib = cited_keys & bib_key_set
         metrics.recall = len(cited_from_bib) / len(bib_key_set)
     else:
         metrics.recall = 1.0
-    
+
     return metrics
 
 
@@ -346,59 +450,36 @@ def evaluate_with_judge(
     )
     
     print(f"\n   🧑‍⚖️ Running LLM-as-Judge ({judge_model})...")
-    
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = client.chat.completions.create(
-                model=judge_model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                timeout=120.0,
-            )
-            
-            raw = response.choices[0].message.content
-            if raw is None:
-                if attempt < MAX_RETRIES:
-                    time.sleep(RETRY_DELAY)
-                continue
-            
-            # Strip thinking tags
-            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL)
-            
-            # Parse JSON
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if match:
-                data = json.loads(match.group(0))
-                result.scores = data.get("scores", {})
-                result.justifications = data.get("score_justifications", {})
-                result.knowledge_leakage = data.get("knowledge_leakage", {})
-                result.strengths = data.get("strengths", [])
-                result.weaknesses = data.get("weaknesses", [])
-                result.comparison_summary = data.get("comparison_summary", "")
-                
-                avg_score = (
-                    sum(result.scores.values()) / len(result.scores)
-                    if result.scores else 0
-                )
-                print(f"   ✅ Judge scores (avg: {avg_score:.1f}/5.0)")
-                for dim, score in result.scores.items():
-                    print(f"      {dim}: {score}/5")
-                
-                leakage = result.knowledge_leakage.get("severity", "none")
-                if leakage != "none":
-                    print(f"   ⚠️ Knowledge leakage detected: {leakage}")
-                
-                break
-            else:
-                print(f"   ⚠️ No JSON found on attempt {attempt}")
-                
-        except Exception as e:
-            print(f"   ⚠️ Judge call failed on attempt {attempt}: {e}")
-            result.error = str(e)
-        
-        if attempt < MAX_RETRIES:
-            time.sleep(RETRY_DELAY)
-    
+
+    data, meta = _call_judge(
+        prompt, judge_model=judge_model, timeout=120.0, label="Tier 2 judge",
+    )
+    result.prompt_hash = meta["prompt_hash"]
+    result.decoding_params = meta["decoding_params"]
+    result.timestamp = meta["timestamp"]
+
+    if data:
+        result.scores = data.get("scores", {})
+        result.justifications = data.get("score_justifications", {})
+        result.knowledge_leakage = data.get("knowledge_leakage", {})
+        result.strengths = data.get("strengths", [])
+        result.weaknesses = data.get("weaknesses", [])
+        result.comparison_summary = data.get("comparison_summary", "")
+
+        avg_score = (
+            sum(result.scores.values()) / len(result.scores)
+            if result.scores else 0
+        )
+        print(f"   ✅ Judge scores (avg: {avg_score:.1f}/5.0)")
+        for dim, score in result.scores.items():
+            print(f"      {dim}: {score}/5")
+
+        leakage = result.knowledge_leakage.get("severity", "none")
+        if leakage != "none":
+            print(f"   ⚠️ Knowledge leakage detected: {leakage}")
+    else:
+        result.error = meta["error"] or "no valid JSON returned"
+
     return result
 
 
@@ -462,117 +543,93 @@ def evaluate_argumentative_roles(
 
     print(f"\n   🎭 Running Argumentative Role Judge ({judge_model})...")
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = client.chat.completions.create(
-                model=judge_model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                timeout=180.0,
+    data, meta = _call_judge(
+        prompt, judge_model=judge_model, timeout=180.0, label="Tier 2B judge",
+    )
+    result.prompt_hash = meta["prompt_hash"]
+    result.decoding_params = meta["decoding_params"]
+    result.timestamp = meta["timestamp"]
+
+    if data:
+        # Store raw judge data
+        result.citation_roles = data.get("citation_roles", {})
+        result.emphasis_comparisons = data.get("emphasis_comparisons", {})
+        result.role_distribution = data.get("role_distribution", {})
+        result.summary = data.get("summary", "")
+
+        # ── Compute Metric 1: Role Match Score ──
+        role_scores = []
+        generated_citations_count = 0
+
+        for key, info in result.citation_roles.items():
+            gen_role = info.get("generated_role", "ABSENT")
+            if gen_role != "ABSENT":
+                generated_citations_count += 1
+
+            match_type = info.get("role_match", "mismatch")
+            if match_type == "exact":
+                role_scores.append(1.0)
+                result.exact_role_matches += 1
+            elif match_type == "adjacent":
+                role_scores.append(0.5)
+                result.adjacent_role_matches += 1
+            elif match_type == "one_sided":
+                # Citation only in one version — not a mismatch per se
+                result.one_sided_citations += 1
+            else:  # mismatch
+                role_scores.append(0.0)
+                result.role_mismatches += 1
+
+        result.total_citations_analyzed = len(result.citation_roles)
+        if role_scores:
+            result.role_match_score = sum(role_scores) / len(role_scores)
+
+        if generated_citations_count > 0:
+            result.alignment_coverage = len(role_scores) / generated_citations_count
+
+        # ── Compute Metric 2: Emphasis Match Score ──
+        emphasis_scores = []
+        for key, info in result.emphasis_comparisons.items():
+            level = info.get("match_level", "generic_or_different")
+            if level == "precise":
+                emphasis_scores.append(1.0)
+                result.precise_emphasis += 1
+            elif level == "partial":
+                emphasis_scores.append(0.5)
+                result.partial_emphasis += 1
+            else:  # generic_or_different
+                emphasis_scores.append(0.0)
+                result.generic_emphasis += 1
+
+        if emphasis_scores:
+            result.emphasis_match_score = (
+                sum(emphasis_scores) / len(emphasis_scores)
             )
 
-            raw = response.choices[0].message.content
-            if raw is None:
-                if attempt < MAX_RETRIES:
-                    time.sleep(RETRY_DELAY)
-                continue
+        # ── Compute Role Distribution Divergence ──
+        gen_dist = result.role_distribution.get("generated", {})
+        orig_dist = result.role_distribution.get("original", {})
+        if gen_dist and orig_dist:
+            result.role_distribution_divergence = _compute_jsd(
+                gen_dist, orig_dist,
+            )
 
-            # Strip thinking tags
-            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL)
-
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if match:
-                data = json.loads(match.group(0))
-
-                # Store raw judge data
-                result.citation_roles = data.get("citation_roles", {})
-                result.emphasis_comparisons = data.get("emphasis_comparisons", {})
-                result.role_distribution = data.get("role_distribution", {})
-                result.summary = data.get("summary", "")
-
-                # ── Compute Metric 1: Role Match Score ──
-                role_scores = []
-                generated_citations_count = 0
-                
-                for key, info in result.citation_roles.items():
-                    gen_role = info.get("generated_role", "ABSENT")
-                    if gen_role != "ABSENT":
-                        generated_citations_count += 1
-                        
-                    match_type = info.get("role_match", "mismatch")
-                    if match_type == "exact":
-                        role_scores.append(1.0)
-                        result.exact_role_matches += 1
-                    elif match_type == "adjacent":
-                        role_scores.append(0.5)
-                        result.adjacent_role_matches += 1
-                    elif match_type == "one_sided":
-                        # Citation only in one version — not a mismatch per se
-                        result.one_sided_citations += 1
-                    else:  # mismatch
-                        role_scores.append(0.0)
-                        result.role_mismatches += 1
-
-                result.total_citations_analyzed = len(result.citation_roles)
-                if role_scores:
-                    result.role_match_score = sum(role_scores) / len(role_scores)
-                
-                if generated_citations_count > 0:
-                    result.alignment_coverage = len(role_scores) / generated_citations_count
-
-                # ── Compute Metric 2: Emphasis Match Score ──
-                emphasis_scores = []
-                for key, info in result.emphasis_comparisons.items():
-                    level = info.get("match_level", "generic_or_different")
-                    if level == "precise":
-                        emphasis_scores.append(1.0)
-                        result.precise_emphasis += 1
-                    elif level == "partial":
-                        emphasis_scores.append(0.5)
-                        result.partial_emphasis += 1
-                    else:  # generic_or_different
-                        emphasis_scores.append(0.0)
-                        result.generic_emphasis += 1
-
-                if emphasis_scores:
-                    result.emphasis_match_score = (
-                        sum(emphasis_scores) / len(emphasis_scores)
-                    )
-
-                # ── Compute Role Distribution Divergence ──
-                gen_dist = result.role_distribution.get("generated", {})
-                orig_dist = result.role_distribution.get("original", {})
-                if gen_dist and orig_dist:
-                    result.role_distribution_divergence = _compute_jsd(
-                        gen_dist, orig_dist,
-                    )
-
-                # Print results
-                print(f"   ✅ Argumentative Role Analysis complete")
-                print(f"      Alignment Coverage: {result.alignment_coverage:.2f} "
-                      f"(aligned={len(role_scores)}, total_generated={generated_citations_count})")
-                print(f"      Role Match Score: {result.role_match_score:.2f} "
-                      f"(exact={result.exact_role_matches}, "
-                      f"adjacent={result.adjacent_role_matches}, "
-                      f"mismatch={result.role_mismatches})")
-                print(f"      Emphasis Match Score: {result.emphasis_match_score:.2f} "
-                      f"(precise={result.precise_emphasis}, "
-                      f"partial={result.partial_emphasis}, "
-                      f"generic={result.generic_emphasis})")
-                print(f"      Role Distribution JSD: "
-                      f"{result.role_distribution_divergence:.3f}")
-
-                break
-            else:
-                print(f"   ⚠️ No JSON found on attempt {attempt}")
-
-        except Exception as e:
-            print(f"   ⚠️ Argumentative role judge failed on attempt "
-                  f"{attempt}: {e}")
-            result.error = str(e)
-
-        if attempt < MAX_RETRIES:
-            time.sleep(RETRY_DELAY)
+        # Print results
+        print(f"   ✅ Argumentative Role Analysis complete")
+        print(f"      Alignment Coverage: {result.alignment_coverage:.2f} "
+              f"(aligned={len(role_scores)}, total_generated={generated_citations_count})")
+        print(f"      Role Match Score: {result.role_match_score:.2f} "
+              f"(exact={result.exact_role_matches}, "
+              f"adjacent={result.adjacent_role_matches}, "
+              f"mismatch={result.role_mismatches})")
+        print(f"      Emphasis Match Score: {result.emphasis_match_score:.2f} "
+              f"(precise={result.precise_emphasis}, "
+              f"partial={result.partial_emphasis}, "
+              f"generic={result.generic_emphasis})")
+        print(f"      Role Distribution JSD: "
+              f"{result.role_distribution_divergence:.3f}")
+    else:
+        result.error = meta["error"] or "no valid JSON returned"
 
     return result
 
@@ -609,82 +666,59 @@ def evaluate_coherence(
 
     print(f"\n   🧭 Running Coherence Judge ({judge_model})...")
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = client.chat.completions.create(
-                model=judge_model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                timeout=180.0,
-            )
+    data, meta = _call_judge(
+        prompt, judge_model=judge_model, timeout=180.0, label="Tier 2C judge",
+    )
+    result.prompt_hash = meta["prompt_hash"]
+    result.decoding_params = meta["decoding_params"]
+    result.timestamp = meta["timestamp"]
 
-            raw = response.choices[0].message.content
-            if raw is None:
-                if attempt < MAX_RETRIES:
-                    time.sleep(RETRY_DELAY)
-                continue
+    if data:
+        # Store challenge and mapping data
+        result.challenges = data.get("challenges", [])
+        result.challenge_citation_mapping = data.get(
+            "challenge_citation_mapping", {},
+        )
 
-            # Strip thinking tags
-            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL)
+        # Alignment scores (Metric 3)
+        alignment = data.get("alignment_scores", {})
+        result.generated_alignment = alignment.get("generated", {})
+        result.original_alignment = alignment.get("original", {})
 
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if match:
-                data = json.loads(match.group(0))
+        # Narrative arc data (Metric 4)
+        arc = data.get("narrative_arc", {})
+        result.generated_arc = arc.get("generated", {})
+        result.original_arc = arc.get("original", {})
 
-                # Store challenge and mapping data
-                result.challenges = data.get("challenges", [])
-                result.challenge_citation_mapping = data.get(
-                    "challenge_citation_mapping", {},
-                )
+        arc_scores = data.get("narrative_arc_scores", {})
+        result.generated_arc_scores = arc_scores.get("generated", {})
+        result.original_arc_scores = arc_scores.get("original", {})
 
-                # Alignment scores (Metric 3)
-                alignment = data.get("alignment_scores", {})
-                result.generated_alignment = alignment.get("generated", {})
-                result.original_alignment = alignment.get("original", {})
+        result.summary = data.get("coherence_summary", "")
 
-                # Narrative arc data (Metric 4)
-                arc = data.get("narrative_arc", {})
-                result.generated_arc = arc.get("generated", {})
-                result.original_arc = arc.get("original", {})
+        # Print results
+        gen_align = result.generated_alignment
+        orig_align = result.original_alignment
+        gen_arc = result.generated_arc_scores
 
-                arc_scores = data.get("narrative_arc_scores", {})
-                result.generated_arc_scores = arc_scores.get("generated", {})
-                result.original_arc_scores = arc_scores.get("original", {})
+        print(f"   ✅ Coherence Analysis complete")
+        print(f"      Challenges identified: {len(result.challenges)}")
+        print(f"      Challenge-Citation Alignment (generated): "
+              f"F1={gen_align.get('alignment_f1', 0):.2f} "
+              f"(coverage={gen_align.get('challenge_coverage', 0):.2f}, "
+              f"relevance={gen_align.get('citation_relevance', 0):.2f})")
+        print(f"      Challenge-Citation Alignment (original):  "
+              f"F1={orig_align.get('alignment_f1', 0):.2f} "
+              f"(coverage={orig_align.get('challenge_coverage', 0):.2f}, "
+              f"relevance={orig_align.get('citation_relevance', 0):.2f})")
+        print(f"      Narrative Arc (generated): "
+              f"composite={gen_arc.get('composite_arc_score', 0):.2f}")
 
-                result.summary = data.get("coherence_summary", "")
-
-                # Print results
-                gen_align = result.generated_alignment
-                orig_align = result.original_alignment
-                gen_arc = result.generated_arc_scores
-
-                print(f"   ✅ Coherence Analysis complete")
-                print(f"      Challenges identified: {len(result.challenges)}")
-                print(f"      Challenge-Citation Alignment (generated): "
-                      f"F1={gen_align.get('alignment_f1', 0):.2f} "
-                      f"(coverage={gen_align.get('challenge_coverage', 0):.2f}, "
-                      f"relevance={gen_align.get('citation_relevance', 0):.2f})")
-                print(f"      Challenge-Citation Alignment (original):  "
-                      f"F1={orig_align.get('alignment_f1', 0):.2f} "
-                      f"(coverage={orig_align.get('challenge_coverage', 0):.2f}, "
-                      f"relevance={orig_align.get('citation_relevance', 0):.2f})")
-                print(f"      Narrative Arc (generated): "
-                      f"composite={gen_arc.get('composite_arc_score', 0):.2f}")
-
-                unconnected = gen_align.get("unconnected_citations", [])
-                if unconnected:
-                    print(f"      ⚠️ Unconnected citations: {unconnected}")
-
-                break
-            else:
-                print(f"   ⚠️ No JSON found on attempt {attempt}")
-
-        except Exception as e:
-            print(f"   ⚠️ Coherence judge failed on attempt {attempt}: {e}")
-            result.error = str(e)
-
-        if attempt < MAX_RETRIES:
-            time.sleep(RETRY_DELAY)
+        unconnected = gen_align.get("unconnected_citations", [])
+        if unconnected:
+            print(f"      ⚠️ Unconnected citations: {unconnected}")
+    else:
+        result.error = meta["error"] or "no valid JSON returned"
 
     return result
 
