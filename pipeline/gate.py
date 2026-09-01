@@ -227,6 +227,34 @@ def _strip_table_bleedin(text: str) -> str:
     return text
 
 
+def _slice_full_text_by_pages(full_text: str, start_page: int, end_page: int, radius: int = 1) -> str:
+    """
+    Slice the full_text to only include content from (start_page - radius) to (end_page + radius).
+    Relies on '--- PAGE N ---' markers in the text.
+    Returns the original text if no markers are found.
+    """
+    import re
+    lines = full_text.split('\n')
+    
+    # Quick check if markers exist
+    if not any(re.match(r'^---\s*PAGE\s+\d+\s*---$', line.strip(), re.IGNORECASE) for line in lines[:200]):
+        return full_text
+        
+    sliced_lines = []
+    in_range = False
+    
+    for line in lines:
+        m = re.match(r'^---\s*PAGE\s+(\d+)\s*---$', line.strip(), re.IGNORECASE)
+        if m:
+            page_num = int(m.group(1))
+            in_range = (start_page - radius) <= page_num <= (end_page + radius)
+            
+        if in_range:
+            sliced_lines.append(line)
+            
+    return '\n'.join(sliced_lines).strip()
+
+
 def run_extraction_gate(
     pdf_path: str,
     boundaries: Boundaries,
@@ -282,7 +310,9 @@ def run_extraction_gate(
     end_found_in_text = False
 
     if full_text and (not start_found or not end_found):
-        norm_full = _normalize_for_search(full_text)
+        # Bound the fallback text to prevent finding snippets on completely unrelated pages
+        sliced_fallback = _slice_full_text_by_pages(full_text, boundaries.start_page, boundaries.end_page)
+        norm_full = _normalize_for_search(sliced_fallback)
 
         if not start_found and boundaries.start_snippet:
             for anchor_len in [len(boundaries.start_snippet.strip()), 80, 50, 35]:
@@ -339,8 +369,9 @@ def run_extraction_gate(
         # _strip_table_bleedin to cleanly remove tables from adjacent
         # sections that bleed into the extraction.
         if full_text:
+            sliced_text = _slice_full_text_by_pages(full_text, boundaries.start_page, boundaries.end_page)
             extracted_text = _trim_to_snippets(
-                full_text, boundaries.start_snippet, boundaries.end_snippet
+                sliced_text, boundaries.start_snippet, boundaries.end_snippet
             )
 
         # Fall back to PyMuPDF coordinate-based extraction
