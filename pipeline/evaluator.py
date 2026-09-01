@@ -20,12 +20,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .abstract_fetcher import parse_bib_file
+from .citation_spans import find_citation_spans
 from .gen_prompts import (
     build_judge_prompt,
     build_argumentative_role_prompt,
     build_coherence_prompt,
 )
 from .extractor import client, MAX_RETRIES, RETRY_DELAY
+
+# Bump when a change alters what existing report fields mean (not just
+# adds new ones) — e.g. the \citep/\citet citation-counting fix below.
+# Old and new reports should not be averaged/compared without checking this.
+REPORT_SCHEMA_VERSION = 2
 
 
 # Judge model — should differ from generation model to avoid self-evaluation bias
@@ -261,6 +267,7 @@ class EvaluationReport:
 
     def to_dict(self) -> dict:
         return {
+            "report_schema_version": REPORT_SCHEMA_VERSION,
             "model": self.model,
             "tier_1_citation_metrics": self.citation_metrics.to_dict(),
             "tier_2_judge_scores": self.judge_scores.to_dict(),
@@ -360,62 +367,60 @@ def evaluate_citations(
 ) -> CitationMetrics:
     """
     Tier 1: Deterministic citation analysis.
-    
+
     Checks:
     - Which bib keys were cited (recall)
     - Whether any hallucinated citations appear (precision)
     - Total citation instances
+
+    Note: citation extraction goes through find_citation_spans(), which
+    matches the full \\cite-family (\\citep, \\citet, \\citealp, ...),
+    not just bare \\cite{}. This changes total_citations relative to
+    report_schema_version 1 — see REPORT_SCHEMA_VERSION at the top of
+    this module.
     """
     bib_path = Path(bib_path)
     metrics = CitationMetrics()
-    
+
     # Get all valid bib keys
     entries = parse_bib_file(bib_path)
     metrics.bib_keys = sorted([e["key"] for e in entries])
     bib_key_set = set(metrics.bib_keys)
-    
-    # Extract cited keys from the generated text
-    cited_keys = set()
-    
-    # Pattern 1: LaTeX \cite{key} or \cite{key1, key2}
-    for match in re.finditer(r'\\cite\{([^}]+)\}', generated_text):
-        keys = [k.strip() for k in match.group(1).split(',')]
-        cited_keys.update(keys)
-    
-    # Pattern 2: Markdown <!-- CITATION_KEYS: key1, key2, ... -->
+
+    spans = find_citation_spans(generated_text, entries)
+
+    # Pattern 2 fallback: Markdown <!-- CITATION_KEYS: key1, key2, ... -->
+    # find_citation_spans already resolves author-date mentions when no
+    # \cite-family command is present; this comment block is a
+    # cross-check for keys the author-date regex may have missed.
     ck_match = re.search(r'<!--\s*CITATION_KEYS:\s*(.*?)\s*-->', generated_text)
+    ck_keys = set()
     if ck_match:
-        keys = [k.strip() for k in ck_match.group(1).split(',')]
-        cited_keys.update(k for k in keys if k)
-    
-    # Clean up empty strings
+        ck_keys = {k.strip() for k in ck_match.group(1).split(',') if k.strip()}
+
+    cited_keys = {s.key for s in spans} | ck_keys
     cited_keys.discard("")
-    
+
     metrics.cited_keys = sorted(cited_keys)
     metrics.hallucinated_keys = sorted(cited_keys - bib_key_set)
     metrics.missing_keys = sorted(bib_key_set - cited_keys)
-    
-    # Count total citation instances (not unique)
-    total = len(re.findall(r'\\cite\{[^}]+\}', generated_text))
-    if not total:
-        # Count author-date style citations
-        for key in cited_keys:
-            total += generated_text.count(key)
-    metrics.total_citations = total
-    
+
+    # Total citation instances (mentions, not unique keys)
+    metrics.total_citations = len(spans) if spans else len(ck_keys)
+
     # Compute precision and recall
     if cited_keys:
         valid_cited = cited_keys & bib_key_set
         metrics.precision = len(valid_cited) / len(cited_keys)
     else:
         metrics.precision = 1.0  # No citations = vacuously precise
-    
+
     if bib_key_set:
         cited_from_bib = cited_keys & bib_key_set
         metrics.recall = len(cited_from_bib) / len(bib_key_set)
     else:
         metrics.recall = 1.0
-    
+
     return metrics
 
 
