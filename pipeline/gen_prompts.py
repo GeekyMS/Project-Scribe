@@ -583,5 +583,93 @@ Return ONLY valid JSON:
     }},
     "coherence_summary": "2-3 sentence summary comparing the argumentative coherence of generated vs. original"
 }}
+"""
+
+
+def build_evidence_support_prompt(claims_batch: list[dict]) -> str:
+    """
+    Build the Tier 4 evidence-support judge prompt.
+
+    Unlike build_judge_prompt / build_argumentative_role_prompt (which
+    both take a bib_content parameter and never interpolate it — the
+    knowledge-leakage check asks whether claims go "beyond what's in
+    the title/abstract" without ever showing the judge the abstracts),
+    this prompt is the first to actually show the judge the cited
+    paper's retrieved text and ask it to check the claim against it.
+
+    Args:
+        claims_batch: list of dicts, each with:
+            citation_id, key, sentence, context, co_cited_keys,
+            paper_title, evidence_text, evidence_kind ("full_text" or
+            "abstract"). Callers must have already filtered out spans
+            with no retrievable evidence — this prompt is only for
+            citations where there is something to check against.
+
+    Returns:
+        A prompt whose response is a JSON object with one verdict per
+        citation_id in the batch.
+    """
+    items_text = []
+    for item in claims_batch:
+        co_cited = item.get("co_cited_keys") or []
+        co_cited_note = (
+            f"\n**Also cited in this sentence:** {', '.join(co_cited)} "
+            f"(attribute the claim to [{item['key']}] specifically, not to these)"
+            if co_cited else ""
+        )
+        kind_label = "FULL TEXT (truncated)" if item.get("evidence_kind") == "full_text" else "ABSTRACT"
+        items_text.append(f"""### Citation [{item['citation_id']}] — key: {item['key']}
+
+**Sentence citing this paper:** "{item['sentence']}"
+**Surrounding context:** "{item['context']}"{co_cited_note}
+
+**Cited paper title:** {item.get('paper_title', 'Unknown')}
+**Cited paper {kind_label}:**
+<evidence>
+{item.get('evidence_text', '')}
+</evidence>
+""")
+
+    items_block = "\n".join(items_text)
+
+    return f"""You are a rigorous fact-checker for academic writing. For each citation below, you are given the SENTENCE that cites a paper and the ACTUAL TEXT of that cited paper (its full text or abstract). Your job is NOT to judge writing quality — it is to check whether the cited paper actually supports what the sentence claims about it.
+
+## YOUR TASK, PER CITATION
+1. Identify the specific assertion the sentence makes about the cited paper — what is it claiming this paper did, found, showed, or argued? (`claim`)
+2. Classify what kind of claim it is (`claim_type`):
+   - "specific_finding" — a concrete result, number, or finding
+   - "method_attribution" — a specific method/technique attributed to this paper
+   - "general_topic" — a broad topical claim ("X studied Y")
+   - "comparative" — a claim comparing this paper to something else
+   - "other"
+3. Check the claim against ONLY the evidence text provided. Do NOT use any outside knowledge of the paper, even if you recognize it. If the evidence doesn't mention something, treat it as unsupported by the evidence — not as false, just unconfirmed by what you were given.
+4. Assign a verdict:
+   - "supported" — the evidence text clearly backs the claim
+   - "partially_supported" — the evidence is related but doesn't fully confirm the specific claim (e.g. confirms the general topic but not the specific number/finding cited)
+   - "unsupported" — the evidence text has nothing relevant to the claim
+   - "contradicted" — the evidence text says something that conflicts with the claim
+   - "unverifiable" — the evidence text is present but too tangential/off-topic to judge the claim either way (this is different from "unsupported": use "unsupported" when the evidence is on-topic but silent on the specific claim, "unverifiable" when the evidence doesn't engage with the claim's subject at all)
+5. If supported or partially supported, quote the specific span of evidence text that backs it (`evidence_quote`) — copy it verbatim, do not paraphrase.
+6. Give a one-sentence justification (≤40 words).
+
+## CITATIONS TO CHECK
+
+{items_block}
+
+## OUTPUT FORMAT
+Return ONLY valid JSON, with exactly one entry per citation_id above:
+{{
+    "verdicts": [
+        {{
+            "citation_id": "<from the input>",
+            "claim": "<the specific assertion made about this paper>",
+            "claim_type": "specific_finding" | "method_attribution" | "general_topic" | "comparative" | "other",
+            "verdict": "supported" | "partially_supported" | "unsupported" | "contradicted" | "unverifiable",
+            "confidence": <0.0-1.0>,
+            "evidence_quote": "<verbatim span from the evidence text, or empty string>",
+            "justification": "<one sentence, <=40 words>"
+        }}
+    ]
+}}
 
 Respond with JSON only."""

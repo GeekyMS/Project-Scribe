@@ -25,6 +25,7 @@ from .gen_prompts import (
     build_judge_prompt,
     build_argumentative_role_prompt,
     build_coherence_prompt,
+    build_evidence_support_prompt,
 )
 from .extractor import client, MAX_RETRIES, RETRY_DELAY
 
@@ -253,6 +254,67 @@ class CoherenceScores:
 
 
 @dataclass
+class EvidenceSupportScores:
+    """
+    Tier 4: Per-citation evidence support.
+
+    For each citation *mention* (a CitationSpan — one per key per
+    sentence), checks the claim the sentence makes about that key
+    against the cited paper's retrieved abstract/full text.
+
+    "unverifiable" is never assigned by silent omission — see
+    evaluate_evidence_support()'s docstring for how each
+    unverifiable_reasons bucket is populated.
+    """
+    per_citation: list[dict] = field(default_factory=list)
+
+    support_rate: float = 0.0        # mean score over verifiable rows only
+    verifiable_count: int = 0
+    unverifiable_count: int = 0
+    total_spans: int = 0
+    evidence_coverage: float = 0.0   # verifiable_count / total_spans
+
+    verdict_counts: dict = field(default_factory=dict)
+    contradicted_keys: list[str] = field(default_factory=list)
+    unverifiable_reasons: dict = field(default_factory=dict)
+    evidence_kind_counts: dict = field(default_factory=dict)
+
+    # Logged per METRICS_CONTRACT §1 — "log the weight, not just the class"
+    score_weights: dict = field(default_factory=lambda: {
+        "supported": 1.0, "partially_supported": 0.5,
+        "unsupported": 0.0, "contradicted": 0.0,
+    })
+
+    judge_model: str = ""
+    n_batches: int = 0
+    batch_prompt_hashes: list[str] = field(default_factory=list)
+    decoding_params: dict = field(default_factory=dict)
+    timestamp: str = ""
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "per_citation": self.per_citation,
+            "support_rate": round(self.support_rate, 4),
+            "verifiable_count": self.verifiable_count,
+            "unverifiable_count": self.unverifiable_count,
+            "total_spans": self.total_spans,
+            "evidence_coverage": round(self.evidence_coverage, 4),
+            "verdict_counts": self.verdict_counts,
+            "contradicted_keys": self.contradicted_keys,
+            "unverifiable_reasons": self.unverifiable_reasons,
+            "evidence_kind_counts": self.evidence_kind_counts,
+            "score_weights": self.score_weights,
+            "judge_model": self.judge_model,
+            "n_batches": self.n_batches,
+            "batch_prompt_hashes": self.batch_prompt_hashes,
+            "decoding_params": self.decoding_params,
+            "timestamp": self.timestamp,
+            "error": self.error,
+        }
+
+
+@dataclass
 class EvaluationReport:
     """Full evaluation report combining all tiers."""
     model: str = ""
@@ -263,6 +325,7 @@ class EvaluationReport:
     )
     coherence_scores: CoherenceScores = field(default_factory=CoherenceScores)
     text_similarity: TextSimilarity = field(default_factory=TextSimilarity)
+    evidence_support: EvidenceSupportScores = field(default_factory=EvidenceSupportScores)
     structural_stats: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -274,6 +337,7 @@ class EvaluationReport:
             "tier_2b_argumentative_roles": self.argumentative_roles.to_dict(),
             "tier_2c_coherence": self.coherence_scores.to_dict(),
             "tier_3_text_similarity": self.text_similarity.to_dict(),
+            "tier_4_evidence_support": self.evidence_support.to_dict(),
             "structural_stats": self.structural_stats,
         }
 
@@ -783,6 +847,235 @@ def evaluate_text_similarity(
 
 
 # ═════════════════════════════════════════════════════════════
+# Tier 4: Evidence Support
+# ═════════════════════════════════════════════════════════════
+
+def _entry_evidence_kind(entry: dict, max_full_text_chars: int) -> tuple[str, str]:
+    """Return (evidence_kind, evidence_text) for a resolved bib entry."""
+    full_text = entry.get("full_text", "")
+    if full_text:
+        return "full_text", full_text[:max_full_text_chars]
+    abstract = entry.get("abstract", "")
+    if abstract:
+        return "abstract", abstract
+    return "none", ""
+
+
+def evaluate_evidence_support(
+    generated_text: str,
+    bib_path: str | Path,
+    enriched_entries: list[dict] | None,
+    judge_model: str = JUDGE_MODEL,
+    max_full_text_chars: int = 6000,
+    batch_size: int = 8,
+) -> EvidenceSupportScores:
+    """
+    Tier 4: Per-citation evidence support.
+
+    For every citation mention in generated_text (via
+    find_citation_spans), checks the claim made about that citation
+    against the cited paper's retrieved evidence (full text preferred,
+    abstract otherwise).
+
+    Every span is resolved to exactly one of:
+      - Sent to the judge, which returns supported / partially_supported
+        / unsupported / contradicted / unverifiable.
+      - Short-circuited in Python to "unverifiable" WITHOUT calling the
+        judge, with a verdict_source recording why:
+          "key_not_in_bib"       — hallucinated citation key
+          "no_evidence"          — resolved paper, but no abstract/full
+                                    text retrieved (evidence_cache status)
+          "low_confidence_match" — resolver matched a paper but below
+                                    the confidence used elsewhere (a
+                                    wrong-paper match here would turn a
+                                    correct claim into a false
+                                    "unsupported", so it's excluded
+                                    from judged evidence by default)
+
+    This split matters: only the judge-assigned "unverifiable" reflects
+    something about the *claim*; the other three reflect something
+    about *retrieval*, and conflating them would make evidence_coverage
+    meaningless.
+
+    Args:
+        generated_text: the generated Related Works section.
+        bib_path: path to the .bib file (used if enriched_entries is None).
+        enriched_entries: entries from enrich_bib_entries()/
+            fetch_and_extract_full_texts(), carrying 'abstract',
+            'full_text', and 'evidence' per pipeline/resolvers.py. If
+            None, falls back to bare bib entries (every span becomes
+            "no_evidence" — there's nothing to check against).
+        judge_model: OpenRouter model id for the judge.
+        max_full_text_chars: truncation applied to full_text evidence
+            before it goes in the prompt.
+        batch_size: citations per judge call.
+    """
+    result = EvidenceSupportScores(judge_model=judge_model)
+
+    bib_entries = parse_bib_file(bib_path) if bib_path else []
+    entry_source = enriched_entries if enriched_entries is not None else bib_entries
+    entry_by_key = {e.get("key", ""): e for e in entry_source}
+
+    spans = find_citation_spans(generated_text, bib_entries or (enriched_entries or []))
+    result.total_spans = len(spans)
+
+    if not spans:
+        return result
+
+    # "unresolved" (no paper found at all) is NOT in this set — it falls
+    # through to the evidence_kind check below and lands on "no_evidence",
+    # which is the correct bucket ("we found nothing to check against").
+    # "matched_low_confidence" (a paper WAS found, but the match itself
+    # is shaky) is the distinct case this set exists for — using its
+    # abstract risks turning a correct claim into a false "unsupported".
+    LOW_CONFIDENCE_STATUSES = {"matched_low_confidence"}
+
+    verifiable_items = []  # dicts ready for the judge prompt
+    row_by_citation_id: dict[str, dict] = {}
+
+    for span in spans:
+        row = {
+            "citation_id": span.citation_id,
+            "citation_key": span.key,
+            "sentence_index": span.sentence_index,
+            "sentence": span.sentence,
+            "co_cited_keys": span.co_cited_keys,
+            "style": span.style,
+            "resolution": span.resolution,
+            "evidence_kind": "none",
+            "evidence_status": None,
+            "evidence_chars": 0,
+            "claim": None,
+            "claim_type": None,
+            "verdict": "unverifiable",
+            "verdict_source": None,
+            "score": None,
+            "confidence": None,
+            "evidence_quote": "",
+            "justification": "",
+            "batch_index": None,
+        }
+        row_by_citation_id[span.citation_id] = row
+
+        entry = entry_by_key.get(span.key)
+        if entry is None or span.resolution == "unmatched":
+            row["verdict_source"] = "key_not_in_bib"
+            continue
+
+        evidence_status = entry.get("evidence", {}).get("status")
+        row["evidence_status"] = evidence_status
+
+        if evidence_status in LOW_CONFIDENCE_STATUSES:
+            row["verdict_source"] = "low_confidence_match"
+            continue
+
+        evidence_kind, evidence_text = _entry_evidence_kind(entry, max_full_text_chars)
+        row["evidence_kind"] = evidence_kind
+        row["evidence_chars"] = len(evidence_text)
+
+        if evidence_kind == "none":
+            row["verdict_source"] = "no_evidence"
+            continue
+
+        verifiable_items.append({
+            "citation_id": span.citation_id,
+            "key": span.key,
+            "sentence": span.sentence,
+            "context": span.context,
+            "co_cited_keys": span.co_cited_keys,
+            "paper_title": entry.get("title", "Unknown"),
+            "evidence_text": evidence_text,
+            "evidence_kind": evidence_kind,
+        })
+
+    # ── Batch through the judge ──
+    n_batches = 0
+    for batch_start in range(0, len(verifiable_items), batch_size):
+        batch = verifiable_items[batch_start:batch_start + batch_size]
+        if not batch:
+            continue
+        n_batches += 1
+        prompt = build_evidence_support_prompt(batch)
+        data, meta = _call_judge(
+            prompt, judge_model=judge_model, timeout=180.0,
+            label=f"Tier 4 evidence batch {n_batches}",
+        )
+        result.batch_prompt_hashes.append(meta["prompt_hash"])
+        result.decoding_params = meta["decoding_params"]
+        result.timestamp = result.timestamp or meta["timestamp"]
+
+        if not data:
+            for item in batch:
+                row = row_by_citation_id.get(item["citation_id"])
+                if row:
+                    row["verdict_source"] = "judge_call_failed"
+            result.error = result.error or meta["error"] or "no valid JSON returned"
+            continue
+
+        for verdict in data.get("verdicts", []):
+            citation_id = verdict.get("citation_id", "")
+            row = row_by_citation_id.get(citation_id)
+            if row is None:
+                continue  # judge returned a citation_id we didn't ask about
+            row["claim"] = verdict.get("claim", "")
+            row["claim_type"] = verdict.get("claim_type", "other")
+            row["verdict"] = verdict.get("verdict", "unverifiable")
+            row["verdict_source"] = "judge"
+            row["confidence"] = verdict.get("confidence")
+            row["evidence_quote"] = verdict.get("evidence_quote", "")
+            row["justification"] = verdict.get("justification", "")
+            row["score"] = result.score_weights.get(row["verdict"])  # None for unverifiable
+            row["batch_index"] = n_batches
+
+    result.n_batches = n_batches
+
+    # ── Aggregate ──
+    per_citation = list(row_by_citation_id.values())
+    result.per_citation = per_citation
+
+    verdict_counts: dict[str, int] = {}
+    unverifiable_reasons: dict[str, int] = {}
+    evidence_kind_counts: dict[str, int] = {}
+    scores = []
+    contradicted_keys = []
+
+    for row in per_citation:
+        verdict_counts[row["verdict"]] = verdict_counts.get(row["verdict"], 0) + 1
+        evidence_kind_counts[row["evidence_kind"]] = evidence_kind_counts.get(row["evidence_kind"], 0) + 1
+
+        if row["verdict"] == "unverifiable":
+            reason = row["verdict_source"] or "unknown"
+            unverifiable_reasons[reason] = unverifiable_reasons.get(reason, 0) + 1
+        elif row["score"] is not None:
+            scores.append(row["score"])
+            if row["verdict"] == "contradicted":
+                contradicted_keys.append(row["citation_key"])
+
+    result.verdict_counts = verdict_counts
+    result.unverifiable_reasons = unverifiable_reasons
+    result.evidence_kind_counts = evidence_kind_counts
+    result.contradicted_keys = contradicted_keys
+    result.verifiable_count = len(scores)
+    result.unverifiable_count = result.total_spans - result.verifiable_count
+    result.evidence_coverage = (
+        result.verifiable_count / result.total_spans if result.total_spans else 0.0
+    )
+    result.support_rate = sum(scores) / len(scores) if scores else 0.0
+
+    print(f"\n   🔬 Tier 4: Evidence Support")
+    print(f"      Evidence coverage: {result.evidence_coverage:.1%} "
+          f"({result.verifiable_count}/{result.total_spans} spans checked)")
+    print(f"      Support rate (of checked): {result.support_rate:.1%}")
+    print(f"      Verdicts: {verdict_counts}")
+    if unverifiable_reasons:
+        print(f"      Unverifiable reasons: {unverifiable_reasons}")
+    if contradicted_keys:
+        print(f"      ⚠️ Contradicted: {contradicted_keys}")
+
+    return result
+
+
+# ═════════════════════════════════════════════════════════════
 # Structural Analysis
 # ═════════════════════════════════════════════════════════════
 
@@ -841,11 +1134,14 @@ def run_evaluation(
     run_judge: bool = True,
     run_argumentation: bool = True,
     run_similarity: bool = True,
+    run_evidence: bool = True,
+    enriched_entries: list[dict] | None = None,
+    enrichment_cache_path: str | Path | None = None,
     outputs_dir: str | Path = "outputs/generation",
 ) -> EvaluationReport:
     """
     Run the full multi-tier evaluation.
-    
+
     Args:
         generated_text: The LLM-generated Related Works section.
         ground_truth: The original Related Works text.
@@ -857,8 +1153,20 @@ def run_evaluation(
             Requires run_judge=True. Costs additional API tokens (2 extra
             judge calls per paper).
         run_similarity: Whether to run Tier 3 (ROUGE/BERTScore).
+        run_evidence: Whether to run Tier 4 (evidence support). Costs
+            additional API tokens (~1 judge call per 8 citations).
+        enriched_entries: Bib entries already enriched with abstracts/
+            full_text/evidence (e.g. GenerationResult.enriched_entries),
+            reused here so Tier 4 doesn't re-hit the retrieval APIs. If
+            None and run_evidence is True, loaded from
+            enrichment_cache_path (or the generation-run defaults under
+            outputs_dir) if present, otherwise fetched fresh.
+        enrichment_cache_path: Cache path to load enriched_entries from
+            when they aren't passed directly. Defaults to
+            outputs_dir/"full_text_cache.json" then
+            outputs_dir/"enrichment_cache.json".
         outputs_dir: Directory for output files.
-    
+
     Returns:
         EvaluationReport with all tier results.
     """
@@ -925,7 +1233,29 @@ def run_evaluation(
               f"(generated/original)")
     else:
         print(f"\n   ⏩ Tier 3: Skipped (--no-similarity)")
-    
+
+    # ── Tier 4: Evidence Support ──
+    if run_evidence:
+        tier4_entries = enriched_entries
+        if tier4_entries is None:
+            for candidate_name in ("full_text_cache.json", "enrichment_cache.json"):
+                candidate_path = Path(enrichment_cache_path or (outputs_dir / candidate_name))
+                if candidate_path.exists():
+                    from . import evidence_cache as _evidence_cache
+                    cached = _evidence_cache.load_cache(candidate_path)
+                    if cached:
+                        tier4_entries = list(cached.values())
+                        break
+                if enrichment_cache_path:
+                    break  # explicit path given — don't fall through to the other default
+        report.evidence_support = evaluate_evidence_support(
+            generated_text=generated_text,
+            bib_path=bib_path,
+            enriched_entries=tier4_entries,
+        )
+    else:
+        print(f"\n   ⏩ Tier 4: Skipped (--no-evidence)")
+
     # ── Structural Stats ──
     print(f"\n   📐 Structural Analysis")
     report.structural_stats = compute_structural_stats(
@@ -1005,11 +1335,19 @@ def _save_side_by_side(
     if gen_arc:
         doc += f"| **Narrative Arc Score** | **{gen_arc.get('composite_arc_score', 0):.2f}** |\n"
     
+    # Evidence support metrics
+    es = report.evidence_support
+    if es.total_spans > 0:
+        doc += f"| **Evidence Coverage** | **{es.evidence_coverage:.1%}** ({es.verifiable_count}/{es.total_spans} spans) |\n"
+        doc += f"| **Evidence Support Rate** | **{es.support_rate:.1%}** |\n"
+        if es.contradicted_keys:
+            doc += f"| ⚠️ Contradicted Citations | {len(es.contradicted_keys)} |\n"
+
     ts = report.text_similarity
     if ts.available:
         doc += f"| ROUGE-L | {ts.rouge_l:.3f} |\n"
         doc += f"| BERTScore F1 | {ts.bert_score_f1:.3f} |\n"
-    
+
     doc += f"| Length Ratio | {ts.length_ratio:.2f}x |\n"
     
     if js.comparison_summary:
@@ -1081,11 +1419,33 @@ def _save_side_by_side(
         if cs.summary:
             doc += f"\n{cs.summary}\n"
     
+    # ── Evidence Support Breakdown ──
+    if es.total_spans > 0:
+        doc += f"\n## 🔬 Evidence Support Analysis\n\n"
+        doc += f"**Evidence Coverage**: {es.evidence_coverage:.1%} "
+        doc += f"({es.verifiable_count}/{es.total_spans} citation mentions had retrievable evidence)\n\n"
+        doc += f"**Support Rate** (of checked citations): {es.support_rate:.1%}\n\n"
+        doc += "| Verdict | Count |\n|---|---|\n"
+        for verdict, count in sorted(es.verdict_counts.items()):
+            doc += f"| {verdict} | {count} |\n"
+        if es.unverifiable_reasons:
+            doc += "\n**Why citations were unverifiable:**\n\n"
+            for reason, count in sorted(es.unverifiable_reasons.items()):
+                doc += f"- `{reason}`: {count}\n"
+        if es.contradicted_keys:
+            doc += f"\n**⚠️ Citations where the evidence contradicts the claim**: "
+            doc += ", ".join(f"`{k}`" for k in es.contradicted_keys) + "\n"
+        unsupported_rows = [r for r in es.per_citation if r["verdict"] == "unsupported"]
+        if unsupported_rows:
+            doc += "\n**Unsupported claims:**\n\n"
+            for r in unsupported_rows[:15]:
+                doc += f"- `[{r['citation_key']}]` \"{r['claim']}\" — {r['justification']}\n"
+
     if cm.hallucinated_keys:
         doc += f"\n## ⚠️ Hallucinated Citations\n\n"
         for k in cm.hallucinated_keys:
             doc += f"- `{k}`\n"
-    
+
     doc += f"\n---\n\n## Generated Related Works\n\n{generated}\n"
     doc += f"\n---\n\n## Original Related Works (Ground Truth)\n\n{ground_truth}\n"
     
