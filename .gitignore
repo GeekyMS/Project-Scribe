@@ -20,6 +20,7 @@ project_summary.md
 methodology.tex
 # Additional ignores requested by user
 *.pdf
+SESSION_RECAP.md
 phd_analysis_outputs/
 METRICS_CONTRACT.md
 my_venv/
