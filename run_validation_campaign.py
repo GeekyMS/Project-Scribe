@@ -139,7 +139,19 @@ def _run_one_paper(paper: dict, paper_out_dir: Path, judge_model: str, max_negat
 
 
 def _load_existing_record(paper_out_dir: Path, paper_id: str) -> dict | None:
-    """Reconstruct a campaign record from a previous run's artifacts, for --skip-existing."""
+    """
+    Reconstruct a campaign record from a previous run's artifacts, for
+    --skip-existing. Returns None when the paper needs (re)processing
+    — either nothing was run yet, or Tier 4 completed but the
+    synthetic-negative step didn't (e.g. the process was killed
+    between the two) AND there were supported rows worth testing.
+
+    "the synthetic_negative_report file is missing" is NOT the same
+    as "there were no supported rows" — the first run of this script
+    conflated them, which silently marked a paper 'no_supported_rows'
+    (with 12 real supported rows sitting right there in its own
+    evaluation_report) instead of resuming the missing step.
+    """
     report_path = paper_out_dir / f"evaluation_report_{paper_id}.json"
     sn_path = paper_out_dir / f"synthetic_negative_report_{paper_id}.json"
     if not report_path.exists():
@@ -147,6 +159,13 @@ def _load_existing_record(paper_out_dir: Path, paper_id: str) -> dict | None:
 
     report_data = json.loads(report_path.read_text(encoding="utf-8"))
     es = report_data.get("tier_4_evidence_support", {})
+    n_supported = es.get("verdict_counts", {}).get("supported", 0)
+
+    if not sn_path.exists():
+        if n_supported > 0:
+            return None  # incomplete — needs the synthetic-negative step, not a "no rows" verdict
+        # else: genuinely nothing to corrupt — fall through and record it as such
+
     record = {
         "paper_id": paper_id,
         "status": "ok" if sn_path.exists() else "no_supported_rows",
@@ -167,6 +186,64 @@ def _load_existing_record(paper_out_dir: Path, paper_id: str) -> dict | None:
             "detection_rate_by_type": sn_data.get("detection_rate_by_type", {}),
         }
         record["synthetic_negative_cases"] = sn_data.get("cases", [])
+    return record
+
+
+def _resume_synthetic_negatives_only(
+    paper: dict, paper_out_dir: Path, judge_model: str, max_negations: int, rng: random.Random,
+) -> dict:
+    """
+    Run just the synthetic-negative step from an ALREADY-PERSISTED
+    Tier 4 evaluation_report, without re-running Tier 4 itself.
+
+    Used when a prior run's evaluation_report exists with supported
+    rows but no synthetic_negative_report — re-running full Tier 4
+    (real judge calls, real cost) just to redo a step that never
+    needed the first step's results recomputed would be wasteful.
+    """
+    paper_id = paper["id"]
+    report_path = paper_out_dir / f"evaluation_report_{paper_id}.json"
+    report_data = json.loads(report_path.read_text(encoding="utf-8"))
+    es = report_data.get("tier_4_evidence_support", {})
+
+    record: dict = {
+        "paper_id": paper_id,
+        "status": "pending",
+        "tier4": {
+            "total_spans": es.get("total_spans", 0),
+            "verifiable_count": es.get("verifiable_count", 0),
+            "evidence_coverage": es.get("evidence_coverage", 0),
+            "support_rate": es.get("support_rate", 0),
+            "verdict_counts": es.get("verdict_counts", {}),
+        },
+    }
+
+    entry_by_key = evidence_cache.load_cache(paper_out_dir / "enrichment_cache.json")
+
+    try:
+        sn_result = evaluate_corruption_set(
+            es.get("per_citation", []), entry_by_key,
+            judge_model=judge_model, call_judge_fn=_call_judge,
+            max_negations=max_negations, rng=rng,
+        )
+    except Exception as e:
+        record["status"] = "synth_neg_failed"
+        record["error"] = f"{type(e).__name__}: {e}"
+        record["traceback"] = traceback.format_exc()
+        return record
+
+    sn_path = paper_out_dir / f"synthetic_negative_report_{paper_id}.json"
+    sn_dict = sn_result.to_dict()
+    sn_path.write_text(json.dumps(sn_dict, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    record["status"] = "ok"
+    record["synthetic_negatives"] = {
+        "n_cases": sn_result.n_cases,
+        "n_detected": sn_result.n_detected,
+        "detection_rate": sn_result.detection_rate,
+        "detection_rate_by_type": sn_result.detection_rate_by_type,
+    }
+    record["synthetic_negative_cases"] = sn_dict["cases"]
     return record
 
 
@@ -260,6 +337,14 @@ def main():
             record = _load_existing_record(paper_out_dir, paper_id)
             if record:
                 print(f"   ⏩ Reusing existing results (status={record['status']})")
+            elif (paper_out_dir / f"evaluation_report_{paper_id}.json").exists():
+                # Tier 4 already ran and persisted supported rows, but the
+                # synthetic-negative step never completed — resume just
+                # that step instead of redoing (and re-paying for) Tier 4.
+                print(f"   ↻ Tier 4 already done, resuming synthetic-negative step only")
+                record = _resume_synthetic_negatives_only(
+                    paper, paper_out_dir, args.judge_model, args.max_negations, rng,
+                )
 
         if record is None:
             record = _run_one_paper(paper, paper_out_dir, args.judge_model, args.max_negations, rng)
