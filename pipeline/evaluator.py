@@ -1012,11 +1012,13 @@ def evaluate_evidence_support(
             result.error = result.error or meta["error"] or "no valid JSON returned"
             continue
 
+        returned_ids = set()
         for verdict in data.get("verdicts", []):
             citation_id = verdict.get("citation_id", "")
             row = row_by_citation_id.get(citation_id)
             if row is None:
                 continue  # judge returned a citation_id we didn't ask about
+            returned_ids.add(citation_id)
             row["claim"] = verdict.get("claim", "")
             row["claim_type"] = verdict.get("claim_type", "other")
             row["verdict"] = verdict.get("verdict", "unverifiable")
@@ -1026,6 +1028,17 @@ def evaluate_evidence_support(
             row["justification"] = verdict.get("justification", "")
             row["score"] = result.score_weights.get(row["verdict"])  # None for unverifiable
             row["batch_index"] = n_batches
+
+        # The judge's JSON parsed fine, but a large batch can still come back
+        # with fewer verdicts than citations asked about — the model silently
+        # drops one. Without this, those rows keep their default verdict_source
+        # of None and land in an unlabeled "unknown" bucket in the aggregate,
+        # indistinguishable from a genuine bug. Caught via a real batch of 92
+        # citations where 21 came back with no verdict at all.
+        for item in batch:
+            row = row_by_citation_id.get(item["citation_id"])
+            if row is not None and item["citation_id"] not in returned_ids:
+                row["verdict_source"] = "judge_omitted_from_response"
 
     result.n_batches = n_batches
 
