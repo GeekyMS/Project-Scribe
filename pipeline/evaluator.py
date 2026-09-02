@@ -1248,6 +1248,22 @@ def run_evaluation(
                         break
                 if enrichment_cache_path:
                     break  # explicit path given — don't fall through to the other default
+
+        if tier4_entries is None:
+            # No enriched_entries passed in AND nothing cached on disk yet —
+            # without this, evaluate_evidence_support() falls back to bare
+            # bib entries (no abstract/full_text/evidence field at all) and
+            # every citation silently comes back "unverifiable"/"no_evidence".
+            # A standalone run_evaluation(run_evidence=True) call — e.g. via
+            # --eval-only, or any caller that didn't go through
+            # generate_related_work() first — must fetch for itself.
+            print(f"\n   🔍 Tier 4: no cached enrichment found — fetching now "
+                  f"(this only happens once per bib; see .env prerequisites "
+                  f"for S2_API_KEY/OPENALEX_API_KEY to speed this up)")
+            from .abstract_fetcher import enrich_bib_entries as _enrich_bib_entries
+            fetch_cache_path = Path(enrichment_cache_path or (outputs_dir / "enrichment_cache.json"))
+            tier4_entries = _enrich_bib_entries(bib_path, cache_path=fetch_cache_path)
+
         report.evidence_support = evaluate_evidence_support(
             generated_text=generated_text,
             bib_path=bib_path,
