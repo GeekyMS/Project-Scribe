@@ -21,6 +21,7 @@ methodology.tex
 # Additional ignores requested by user
 *.pdf
 SESSION_RECAP.md
+SESSION_RECAP_DETAILS.md
 phd_analysis_outputs/
 METRICS_CONTRACT.md
 my_venv/
