@@ -673,3 +673,39 @@ Return ONLY valid JSON, with exactly one entry per citation_id above:
 }}
 
 Respond with JSON only."""
+
+
+def build_claim_negation_prompt(claim: str) -> str:
+    """
+    Build the prompt for the "negate" synthetic-negative corruption
+    (pipeline/synthetic_negatives.py).
+
+    Takes a claim Tier 4 already verified as supported by real evidence
+    and asks for a plausible-sounding but FALSE variant — flip the
+    finding, invert a comparison, or change what was concluded. This
+    produces a known-bad claim to check whether Tier 4 actually
+    catches falsification, rather than just rubber-stamping anything
+    that sounds like academic prose.
+
+    The corrupted claim is checked against the SAME real evidence text
+    the original claim was verified against — a working checker should
+    now say unsupported/contradicted, not supported.
+    """
+    return f"""You are helping construct a test set for a fact-checking system. Given a TRUE claim about a research paper, produce a FALSE variant that:
+- Sounds equally plausible and is written in the same style/register as the original
+- Is clearly a different (and incorrect) claim — flip the finding, reverse a comparison, or state the opposite conclusion
+- Is NOT just a trivial negation like adding "not" — make it a substantively different claim a careless reader might not catch
+- Stays the same approximate length as the original
+
+## TRUE CLAIM
+"{claim}"
+
+## OUTPUT FORMAT
+Return ONLY valid JSON:
+{{
+    "corrupted_claim": "<the false variant>",
+    "corruption_description": "<one sentence: what was changed and how>"
+}}
+
+Respond with JSON only."""
+
