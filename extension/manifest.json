@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Scribe Overleaf Risk Spike",
+  "version": "0.0.1",
+  "description": "Not a product. Measures whether a durable EditorView handle is reachable, complete, and writable on a live Overleaf CM6 project. See extension/README.md.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.overleaf.com/project/*"],
+      "js": ["inject.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.overleaf.com/project/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
