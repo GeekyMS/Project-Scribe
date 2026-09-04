@@ -85,6 +85,7 @@
       report("SCRIBE_INSERT", callInject("SCRIBE_INSERT", { text: "%SCRIBE-SPIKE-TEST-INSERT%" }))
     );
     makeButton("Ping background", () => report("background round-trip", relayThroughBackground("PING", {})));
+    makeButton("Probe file access", () => report("SCRIBE_PROBE_FILES", callInject("SCRIBE_PROBE_FILES")));
 
     panel.appendChild(btnRow);
     panel.appendChild(out);

@@ -50,3 +50,28 @@ CodeMirror only rendered ~4-5KB into the DOM at any given scroll position (viewp
 
 - No surprises on completeness or writability — both came back cleanly on the first attempt.
 - The Path B "durability" result needed a second look to interpret correctly; the instrumentation's own implementation choice (live re-query vs. cache) shaped the result more than an inherent property of the DOM-walk approach. Worth remembering when reading this file later: a clean pass here does not mean "cache a Path B handle and reuse it safely" — that specific claim remains unverified.
+
+---
+
+## 5. Bib file access (Part 1 of the MVP plan — separate spike, pending)
+
+The measurements above only proved read/write on the *currently open*
+document. The MVP needs to read a `.bib` file elsewhere in the project's file
+tree, which is untested. Run **Probe file access** (see README §"Bib-access
+probe") against a project containing at least one `.bib` file and record the
+raw JSON result here.
+
+**Date tested:**
+
+**Raw `SCRIBE_PROBE_FILES` result:**
+```
+(paste JSON here)
+```
+
+- `ideObject` — any of `_ide`/`ide`/`__OL_IDE__` present? [ ] yes [ ] no — which: `___`
+- `fileTreeDom` — `.bib` entries found in the DOM? [ ] yes [ ] no — count: `___`
+- `socketOrRest` — `socket`/`io` present? [ ] yes [ ] no — project id parsed from URL: `___`
+
+**Chosen approach:** [ ] ideObject [ ] file-tree DOM open-and-read [ ] socket/REST [ ] none worked — fall back to `%%%SCRIBE-BIB-START` comment block for the MVP
+
+**Notes:**

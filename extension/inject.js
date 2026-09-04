@@ -104,10 +104,81 @@
     );
   }
 
+  // ---- Path C: probe for a way to read OTHER project files (not just the
+  // open document) — needed for real .bib discovery. Tried in order of
+  // preference; report all three so FINDINGS.md can record which worked
+  // without re-running the probe multiple times.
+
+  function probeIdeObject() {
+    // Overleaf's Angular/React app historically exposed an `_ide` (or
+    // similar) object on window carrying the file tree and doc-loading
+    // machinery. This has moved around across Overleaf versions, so try a
+    // few known/plausible globals rather than assuming one name.
+    const candidateGlobalNames = ["_ide", "ide", "__OL_IDE__"];
+    const found = {};
+    for (const name of candidateGlobalNames) {
+      const obj = window[name];
+      if (obj) {
+        found[name] = {
+          type: typeof obj,
+          keys: typeof obj === "object" ? Object.keys(obj).slice(0, 40) : null,
+        };
+      }
+    }
+    return { checked: candidateGlobalNames, found };
+  }
+
+  function probeFileTreeDom() {
+    // Look for anything in the DOM that looks like a file-tree entry
+    // referencing a .bib file — report selectors/text, not full HTML.
+    const candidates = [];
+    const all = document.querySelectorAll("[class*='file-tree'] *, [class*='entity']");
+    for (const el of all) {
+      const text = (el.textContent || "").trim();
+      if (text.endsWith(".bib") && text.length < 120) {
+        candidates.push({
+          text,
+          tag: el.tagName,
+          className: typeof el.className === "string" ? el.className.slice(0, 100) : null,
+          hasClickHandlerGuess: !!(el.onclick || el.getAttribute("role") === "button"),
+        });
+      }
+    }
+    return { matchCount: candidates.length, candidates: candidates.slice(0, 10) };
+  }
+
+  function probeSocketOrRest() {
+    // Report whether common Overleaf real-time/collab globals are present.
+    // We do NOT call anything here — just detect presence, since calling
+    // blind into an internal API could have side effects we don't want in
+    // a spike.
+    const candidateGlobalNames = ["socket", "io", "__meta__"];
+    const found = {};
+    for (const name of candidateGlobalNames) {
+      if (window[name]) found[name] = typeof window[name];
+    }
+    // Also report the project id if visible in the URL, since REST/socket
+    // approaches would need it.
+    const projectIdMatch = window.location.pathname.match(/\/project\/([a-f0-9]+)/);
+    return {
+      found,
+      projectId: projectIdMatch ? projectIdMatch[1] : null,
+    };
+  }
+
   window.addEventListener("scribe:request", (event) => {
     const { requestId, type, payload } = event.detail || {};
 
     try {
+      if (type === "SCRIBE_PROBE_FILES") {
+        respond(requestId, type, {
+          ideObject: probeIdeObject(),
+          fileTreeDom: probeFileTreeDom(),
+          socketOrRest: probeSocketOrRest(),
+        });
+        return;
+      }
+
       if (type === "SCRIBE_PROBE") {
         const b = probePathB();
         const a = { path: pathAView ? "UNSTABLE_editor:extensions" : null, view: pathAView };

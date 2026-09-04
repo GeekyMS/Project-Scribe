@@ -20,8 +20,8 @@ unbundled files — no build step.
    vacuously, since a short doc has no un-rendered region to miss.
 
 A small dark panel should appear pinned to the bottom-right of the page with
-four buttons: **Probe**, **Read doc**, **Insert test text**, **Ping
-background**.
+five buttons: **Probe**, **Read doc**, **Insert test text**, **Ping
+background**, **Probe file access**.
 
 ## Manual test procedure
 
@@ -49,6 +49,34 @@ background**.
    background round trip works, independent of the CodeMirror measurements.
 7. Copy the four results into `FINDINGS.md` in this directory (template
    already there) and commit.
+
+## Bib-access probe (Part 1 of the MVP plan)
+
+The measurements above only prove we can read/write the *currently open*
+document. The MVP needs to find and read a `.bib` file elsewhere in the
+project's file tree — that's a separate, untested capability.
+
+Make sure the Overleaf project has at least one `.bib` file in its file tree
+(create one if needed — content doesn't matter for this probe), then:
+
+1. Click **Probe file access**. It checks three things and reports all of
+   them, without calling anything that could have a side effect:
+   - **`ideObject`** — whether `window._ide` / `window.ide` / a couple of
+     other plausible global names exist and, if so, what top-level keys they
+     expose. This is the cleanest route if it's there: Overleaf's own app
+     object, no DOM scraping.
+   - **`fileTreeDom`** — file-tree DOM elements whose text ends in `.bib`,
+     with tag/class info. Tells us whether a "click it open, then read it
+     with the existing SCRIBE_READ path" fallback is even findable.
+   - **`socketOrRest`** — whether `window.socket`/`window.io` (Overleaf's
+     real-time collab transport) are present, plus the project id parsed out
+     of the URL, which any REST-based approach would need.
+2. Record the full JSON result in `FINDINGS.md` under a new "Bib access"
+   section (template pending — copy the shape of the sections above).
+3. If `ideObject` looks promising, the next step (not yet built) is to
+   inspect its keys by hand in the DevTools console (`window._ide`, etc.) to
+   find the doc-loading method — this probe only detects presence, it
+   doesn't call in.
 
 ## Why `world: "MAIN"` instead of an injected `<script src=...>` tag
 
