@@ -1,0 +1,83 @@
+# Scribe Extension Service
+
+Local HTTP service wrapping the Project Scribe pipeline (generation +
+citation/evidence checking) for the Overleaf extension. Runs on your own
+machine; your `OPENROUTER_API_KEY` stays in `.env` and is never sent to
+the browser.
+
+## Run it
+
+From the repo root (required — pipeline modules' `load_dotenv()` resolves
+`.env` relative to the current working directory):
+
+```bash
+./my_venv/bin/uvicorn service.app:app --port 8765
+```
+
+Visit `http://127.0.0.1:8765/docs` for FastAPI's interactive API explorer —
+you can exercise both endpoints by hand from there without the extension.
+
+## Endpoints
+
+- `GET /health` — `{ok, has_key}`. `has_key` reflects whether
+  `OPENROUTER_API_KEY` is set; the extension should show connected/offline
+  based on this before attempting a job.
+- `POST /jobs/generate` — `{tex_source, bib_content, target_word_count?, model?}`
+  → `{job_id}`. Builds the generation prompt from enriched bib entries and
+  calls the model directly (does not use `generate_related_work()`, which
+  is path-based and writes eight files per call).
+- `POST /jobs/check` — `{text, bib_content}` → `{job_id}`. Runs Tier 1
+  (`evaluate_citations`) and Tier 4 (`evaluate_evidence_support`) against
+  the given text.
+- `GET /jobs/{job_id}` — `{status, progress, result, error}`. Poll this
+  until `status` is `done` or `error`. `progress.stage` tracks
+  `parsing_bib` → `enriching_references` (the slow part — ~3s per
+  *uncached* entry with no `S2_API_KEY`; a bib full of unresolvable
+  entries re-pays this every run, since only successfully-resolved
+  entries are cached as non-retryable) → `checking_citation_keys` /
+  `checking_evidence_support` / `generating` → `done`.
+
+Both job types run in the same 4-worker thread pool (`service/jobs.py`) —
+in-memory, no persistence across restarts, appropriate for one local user.
+
+## Reused pipeline surface
+
+- `pipeline.abstract_fetcher.parse_bib_content` / `enrich_entries` — the
+  content-based cores added alongside the existing path-based
+  `parse_bib_file` / `enrich_bib_entries` (unchanged, still used elsewhere).
+- `pipeline.evaluator.evaluate_citations` / `evaluate_evidence_support` —
+  both gained an optional `bib_entries` param to skip re-parsing a path
+  when the caller already has entries in memory. Existing callers using
+  `bib_path` are unaffected.
+- `pipeline.generator.client` / `DEFAULT_MODEL` / `MAX_RETRIES` /
+  `RETRY_DELAY` — reused directly; `service/tasks.py` builds the prompt via
+  `pipeline.gen_prompts.build_generation_prompt` and owns the OpenRouter
+  call itself, to avoid `generate_related_work()`'s eight-file-per-call
+  side effects.
+
+One shared enrichment cache at `outputs/service/enrichment_cache.json`
+(atomic per-entry writes via the existing `pipeline.evidence_cache`) so
+repeat requests on the same bibliography don't re-pay retrieval latency —
+except for entries that never resolve, which stay retryable by design
+(see `evidence_cache.needs_refetch`) and get re-attempted every run.
+
+## Manual smoke test
+
+```bash
+curl -s http://127.0.0.1:8765/health
+
+curl -s -X POST http://127.0.0.1:8765/jobs/check \
+  -H 'Content-Type: application/json' \
+  -d "{\"text\": $(python3 -c 'import json;print(json.dumps(open("extension/test-fixtures/long_test.tex").read()))'), \
+       \"bib_content\": $(python3 -c 'import json;print(json.dumps(open("extension/test-fixtures/refs.bib").read()))')}"
+# -> {"job_id": "..."}
+
+curl -s http://127.0.0.1:8765/jobs/<job_id>   # poll until status is "done"
+```
+
+Verified end to end (2026-09-04) against `extension/test-fixtures/`:
+`/jobs/check`'s Tier 1 output matched a direct `evaluate_citations()` call
+exactly (recall/precision 0.9167, `hallucinated_keys: ["wong2024fake"]`,
+`missing_keys: ["fournier2015spans"]`); `/jobs/generate` produced real
+LaTeX with correctly-cited `\cite{}` keys pulled from the bib in ~11s for a
+small smoke-test paper.

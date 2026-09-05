@@ -19,6 +19,7 @@ the RATE_* module constants below, since documented budgets change
 import os
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,8 +45,15 @@ def parse_bib_file(bib_path: str | Path) -> list[dict]:
     all other fields present in the entry.
     """
     bib_path = Path(bib_path)
-    text = bib_path.read_text(encoding="utf-8")
+    return parse_bib_content(bib_path.read_text(encoding="utf-8"))
 
+
+def parse_bib_content(text: str) -> list[dict]:
+    """
+    Same as parse_bib_file, but from an in-memory BibTeX string —
+    the entry point for callers that already have the content (e.g. a
+    service that received it over HTTP rather than reading it off disk).
+    """
     entries = []
     # Match @type{key, ... } blocks
     pattern = re.compile(
@@ -113,7 +121,39 @@ def enrich_bib_entries(
         string if none found) and an 'evidence' block recording how
         the resolution went — see resolvers.py / evidence_cache.py.
     """
-    bib_path = Path(bib_path)
+    bib_entries = parse_bib_file(bib_path)
+    return enrich_entries(
+        bib_entries,
+        cache_path,
+        force_refresh=force_refresh,
+        retry_failed=retry_failed,
+        mailto=mailto,
+        s2_api_key=s2_api_key,
+    )
+
+
+def enrich_entries(
+    bib_entries: list[dict],
+    cache_path: str | Path | None = None,
+    *,
+    force_refresh: bool = False,
+    retry_failed: bool = True,
+    mailto: str | None = None,
+    s2_api_key: str | None = None,
+    progress: Callable | None = None,
+) -> list[dict]:
+    """
+    Same as enrich_bib_entries, but takes already-parsed entries instead
+    of a bib path — the entry point for callers holding bib content
+    in-memory (e.g. a service that received it over HTTP).
+
+    Args:
+        progress: optional callback invoked as progress(done, total, key,
+            status) after each entry (cached or freshly resolved), for
+            callers that want to report incremental status (e.g. a job's
+            polling endpoint) rather than waiting for the full list.
+        (all other args: see enrich_bib_entries)
+    """
     mailto = mailto or os.getenv("CONTACT_EMAIL")
     s2_api_key = s2_api_key or os.getenv("S2_API_KEY")
     openalex_api_key = os.getenv("OPENALEX_API_KEY")
@@ -123,7 +163,6 @@ def enrich_bib_entries(
 
     cached_entries = evidence_cache.load_cache(cache_path) if cache_path else {}
 
-    bib_entries = parse_bib_file(bib_path)
     print(f"\n   🔍 Enriching {len(bib_entries)} bib entries "
           f"(DOI → arXiv → title search cascade)...")
     if not s2_api_key:
@@ -158,6 +197,8 @@ def enrich_bib_entries(
 
             status_counts[result["evidence"]["status"]] = status_counts.get(result["evidence"]["status"], 0) + 1
             enriched.append(result)
+            if progress:
+                progress(i + 1, len(bib_entries), key, result["evidence"]["status"])
 
     found_count = sum(1 for e in enriched if e.get("abstract"))
     print(f"\n   ✅ Enriched {found_count}/{len(bib_entries)} entries with abstracts "

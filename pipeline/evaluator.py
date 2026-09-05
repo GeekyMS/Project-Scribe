@@ -427,7 +427,8 @@ def _call_judge(
 
 def evaluate_citations(
     generated_text: str,
-    bib_path: str | Path,
+    bib_path: str | Path | None = None,
+    bib_entries: list[dict] | None = None,
 ) -> CitationMetrics:
     """
     Tier 1: Deterministic citation analysis.
@@ -442,12 +443,17 @@ def evaluate_citations(
     not just bare \\cite{}. This changes total_citations relative to
     report_schema_version 1 — see REPORT_SCHEMA_VERSION at the top of
     this module.
+
+    Args:
+        bib_entries: already-parsed bib entries, if the caller has them
+            (e.g. from parse_bib_content on in-memory bib text). Skips
+            the internal parse_bib_file(bib_path) call below. If None,
+            falls back to parsing bib_path as before.
     """
-    bib_path = Path(bib_path)
     metrics = CitationMetrics()
 
     # Get all valid bib keys
-    entries = parse_bib_file(bib_path)
+    entries = bib_entries if bib_entries is not None else parse_bib_file(bib_path)
     metrics.bib_keys = sorted([e["key"] for e in entries])
     bib_key_set = set(metrics.bib_keys)
 
@@ -863,11 +869,12 @@ def _entry_evidence_kind(entry: dict, max_full_text_chars: int) -> tuple[str, st
 
 def evaluate_evidence_support(
     generated_text: str,
-    bib_path: str | Path,
+    bib_path: str | Path | None,
     enriched_entries: list[dict] | None,
     judge_model: str = JUDGE_MODEL,
     max_full_text_chars: int = 6000,
     batch_size: int = 8,
+    bib_entries: list[dict] | None = None,
 ) -> EvidenceSupportScores:
     """
     Tier 4: Per-citation evidence support.
@@ -909,10 +916,16 @@ def evaluate_evidence_support(
         max_full_text_chars: truncation applied to full_text evidence
             before it goes in the prompt.
         batch_size: citations per judge call.
+        bib_entries: already-parsed bib entries, if the caller has them
+            (e.g. from parse_bib_content on in-memory bib text). Skips
+            the internal parse_bib_file(bib_path) call below. Ignored if
+            bib_path is also given and bib_entries is None — falls back
+            to parsing bib_path as before.
     """
     result = EvidenceSupportScores(judge_model=judge_model)
 
-    bib_entries = parse_bib_file(bib_path) if bib_path else []
+    if bib_entries is None:
+        bib_entries = parse_bib_file(bib_path) if bib_path else []
     entry_source = enriched_entries if enriched_entries is not None else bib_entries
     entry_by_key = {e.get("key", ""): e for e in entry_source}
 
