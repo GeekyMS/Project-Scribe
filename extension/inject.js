@@ -202,6 +202,7 @@
         const text = view.state.doc.toString();
         respond(requestId, type, {
           source,
+          text,
           length: view.state.doc.length,
           lines: view.state.doc.lines,
           hash: hashString(text),
