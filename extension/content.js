@@ -61,15 +61,23 @@
     // Same node set as findLeafEntriesByExactText, but looking for anything
     // ending in .bib rather than an exact match — this is how we auto-detect
     // a bib filename instead of requiring the user to type one.
+    //
+    // Folder-container elements' textContent concatenates every descendant
+    // filename (seen in SCRIBE_PROBE_FILES as e.g. a folder "book_5"
+    // containing "refs.bib" reporting textContent "book_5refs.bib") — the
+    // same selector matches both the noisy container and the clean leaf
+    // underneath it, so picking the FIRST match risked returning the noisy
+    // one. Since concatenated noise is always longer than the real leaf
+    // filename, take the shortest candidate instead of the first.
     const nodes = document.querySelectorAll(".item-name, [class*='file-tree'] span, [class*='entity-name']");
+    let best = null;
     for (const el of nodes) {
       const text = (el.textContent || "").trim();
-      // Guard against folder-container elements whose textContent
-      // concatenates every descendant filename (seen in SCRIBE_PROBE_FILES
-      // as e.g. "book_5refs.bib") — a real leaf entry's name is short.
-      if (text.endsWith(".bib") && text.length < 60) return text;
+      if (text.endsWith(".bib") && text.length < 60) {
+        if (!best || text.length < best.length) best = text;
+      }
     }
-    return null;
+    return best;
   }
 
   function findCurrentlySelectedEntryText() {
