@@ -78,6 +78,31 @@ Make sure the Overleaf project has at least one `.bib` file in its file tree
    find the doc-loading method — this probe only detects presence, it
    doesn't call in.
 
+**Result on the tested project:** `ideObject` was empty, `fileTreeDom` found
+clean leaf matches for `refs.bib`. Chosen approach: file-tree DOM
+open-and-read. See `FINDINGS.md` §5.
+
+## Fetch another file by name
+
+With that chosen, the panel now has an input (defaults to `refs.bib`) and a
+**Fetch file by name** button that:
+
+1. Records whichever file-tree entry looks currently "selected" (best-effort).
+2. Finds the file-tree leaf entry with that exact filename and clicks it.
+3. Polls `SCRIBE_PROBE`'s `pathA.hookFireCount` until it increments — i.e.
+   waits for confirmation that Overleaf actually rebuilt the editor for the
+   new file, rather than guessing a fixed delay.
+4. Reads the new document via the existing `SCRIBE_READ` path.
+5. Attempts to click back to whatever was open before.
+
+To test: with `refs.bib` present in the project (see
+`extension/test-fixtures/refs.bib`), have some *other* `.tex` file open,
+click **Fetch file by name**, and check:
+- `read.head`/`read.tail` in the result show BibTeX content, not your `.tex`.
+- The editor visibly switches back to the original file afterward
+  (`restored: true` isn't proof by itself — confirm visually, since the
+  "selected" class used to find the original file is an unconfirmed guess).
+
 ## Why `world: "MAIN"` instead of an injected `<script src=...>` tag
 
 Overleaf serves a strict Content-Security-Policy. A CSP applies to `<script>`

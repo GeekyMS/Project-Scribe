@@ -38,6 +38,99 @@
     });
   }
 
+  // ---- Fetch another file by name (Part 1 of the MVP plan) ----------------
+  //
+  // Confirmed via SCRIBE_PROBE_FILES: window._ide-style globals don't exist
+  // on this Overleaf version, but real leaf file-tree entries are findable
+  // in the DOM with clean, exact filename text (e.g. a `.item-name` div and
+  // a bare `<span>`, both containing exactly "refs.bib" — the other DOM
+  // matches from that probe were folder containers whose textContent
+  // concatenates all descendant filenames, not real targets).
+  //
+  // Strategy: find the leaf entry, remember whatever's currently marked
+  // selected (best-effort, so we can click back afterward), click the
+  // target, wait for inject.js's Path A hook to fire again (proven durable
+  // in the risk spike), then read via the existing SCRIBE_READ path.
+
+  function findLeafEntriesByExactText(targetText) {
+    const matches = [];
+    const nodes = document.querySelectorAll(".item-name, [class*='file-tree'] span, [class*='entity-name']");
+    for (const el of nodes) {
+      if ((el.textContent || "").trim() === targetText) matches.push(el);
+    }
+    return matches;
+  }
+
+  function findCurrentlySelectedEntryText() {
+    // Best-effort only — class names for "selected" are not confirmed by
+    // the probe. If this comes back empty, restoring the original file
+    // after the fetch will have to be done manually.
+    const el = document.querySelector(
+      "[class*='file-tree'] [class*='selected'], [class*='file-tree'] [aria-selected='true']"
+    );
+    if (!el) return null;
+    const nameEl = el.querySelector(".item-name") || el;
+    const text = (nameEl.textContent || "").trim();
+    return text || null;
+  }
+
+  function clickEntry(el) {
+    // React apps generally respond to a real MouseEvent dispatch better
+    // than to a bare .click() on a non-<button> element.
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function fetchFileByName(targetText, { timeoutMs = 4000, pollMs = 150 } = {}) {
+    const before = await callInject("SCRIBE_PROBE");
+    const hookCountBefore = before.result && before.result.pathA ? before.result.pathA.hookFireCount : null;
+    const previouslySelected = findCurrentlySelectedEntryText();
+
+    const targets = findLeafEntriesByExactText(targetText);
+    if (targets.length === 0) {
+      return { error: `no file-tree entry found with exact text "${targetText}"`, previouslySelected };
+    }
+    clickEntry(targets[0]);
+
+    // Wait for Path A's hook to re-fire (new editor instance for the newly
+    // opened file), rather than a fixed guess-and-hope delay.
+    const deadline = Date.now() + timeoutMs;
+    let hookFired = false;
+    while (Date.now() < deadline) {
+      await sleep(pollMs);
+      const probe = await callInject("SCRIBE_PROBE");
+      const count = probe.result && probe.result.pathA ? probe.result.pathA.hookFireCount : null;
+      if (hookCountBefore !== null && count !== null && count > hookCountBefore) {
+        hookFired = true;
+        break;
+      }
+    }
+
+    const read = await callInject("SCRIBE_READ");
+
+    let restored = false;
+    if (previouslySelected) {
+      const backTargets = findLeafEntriesByExactText(previouslySelected);
+      if (backTargets.length > 0) {
+        clickEntry(backTargets[0]);
+        restored = true;
+      }
+    }
+
+    return {
+      target: targetText,
+      hookFired,
+      hookCountBefore,
+      previouslySelected,
+      restored,
+      read: read.result,
+      readError: read.error,
+    };
+  }
+
   // ---- Dev panel ------------------------------------------------------
 
   function buildPanel() {
@@ -88,6 +181,20 @@
     makeButton("Probe file access", () => report("SCRIBE_PROBE_FILES", callInject("SCRIBE_PROBE_FILES")));
 
     panel.appendChild(btnRow);
+
+    const fetchRow = document.createElement("div");
+    fetchRow.style.cssText = "display:flex;gap:6px;margin-bottom:8px;";
+    const fetchInput = document.createElement("input");
+    fetchInput.type = "text";
+    fetchInput.value = "refs.bib";
+    fetchInput.style.cssText = "flex:1;font:11px monospace;padding:3px;";
+    const fetchBtn = document.createElement("button");
+    fetchBtn.textContent = "Fetch file by name";
+    fetchBtn.style.cssText = "cursor:pointer;padding:4px 8px;";
+    fetchBtn.addEventListener("click", () => report(`fetch "${fetchInput.value}"`, fetchFileByName(fetchInput.value)));
+    fetchRow.appendChild(fetchInput);
+    fetchRow.appendChild(fetchBtn);
+    panel.appendChild(fetchRow);
     panel.appendChild(out);
     document.documentElement.appendChild(panel);
   }

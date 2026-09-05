@@ -61,17 +61,32 @@ tree, which is untested. Run **Probe file access** (see README §"Bib-access
 probe") against a project containing at least one `.bib` file and record the
 raw JSON result here.
 
-**Date tested:**
+**Date tested:** 2026-09-04
 
 **Raw `SCRIBE_PROBE_FILES` result:**
-```
-(paste JSON here)
+```json
+{
+  "ideObject": { "checked": ["_ide", "ide", "__OL_IDE__"], "found": {} },
+  "fileTreeDom": {
+    "matchCount": 6,
+    "candidates": [
+      { "text": "book_5refs.bib", "tag": "LI", "className": "" },
+      { "text": "book_5refs.bib", "tag": "DIV", "className": "entity" },
+      { "text": "book_5refs.bib", "tag": "DIV", "className": "entity-name entity-name-react" },
+      { "text": "book_5refs.bib", "tag": "DIV", "className": "file-tree-entity-details" },
+      { "text": "refs.bib", "tag": "DIV", "className": "item-name" },
+      { "text": "refs.bib", "tag": "SPAN", "className": "" }
+    ]
+  },
+  "socketOrRest": { "found": { "io": "object" }, "projectId": "6a9b426c13ee868708058ffa" }
+}
 ```
 
-- `ideObject` — any of `_ide`/`ide`/`__OL_IDE__` present? [ ] yes [ ] no — which: `___`
-- `fileTreeDom` — `.bib` entries found in the DOM? [ ] yes [ ] no — count: `___`
-- `socketOrRest` — `socket`/`io` present? [ ] yes [ ] no — project id parsed from URL: `___`
+- `ideObject` — any of `_ide`/`ide`/`__OL_IDE__` present? [ ] yes [x] no
+- `fileTreeDom` — `.bib` entries found in the DOM? [x] yes [ ] no — count: `6` (2 clean leaf matches — `DIV.item-name` and a bare `SPAN`, both exact text `"refs.bib"`; the other 4 are folder-container elements whose `textContent` concatenates descendant filenames, e.g. `"book_5refs.bib"` — not real targets, an artifact of the query selector)
+- `socketOrRest` — `socket`/`io` present? [x] yes (`window.io`) [ ] no — project id parsed from URL: `6a9b426c13ee868708058ffa`
 
-**Chosen approach:** [ ] ideObject [ ] file-tree DOM open-and-read [ ] socket/REST [ ] none worked — fall back to `%%%SCRIBE-BIB-START` comment block for the MVP
+**Chosen approach:** [ ] ideObject [x] file-tree DOM open-and-read [ ] socket/REST [ ] none worked
 
 **Notes:**
+`window._ide` and friends don't exist on this Overleaf version — that route is closed. `window.io` (Socket.IO) is present, which could support a REST/socket-based read later, but calling into an undocumented internal transport is more invasive than clicking a file open; kept as a fallback idea, not pursued. The file-tree DOM route is concretely viable: exact-text leaf matches exist and are trivially selectable. Implemented as `fetchFileByName()` in `content.js` — finds the leaf entry, records whatever's currently marked "selected" (best-effort; the actual "selected" class name is unconfirmed), clicks the target, polls `SCRIBE_PROBE`'s `pathA.hookFireCount` until it increments (proving Path A re-fired for the newly opened file, per the durability result in §4) rather than guessing a fixed delay, then reads via the existing `SCRIBE_READ`. Attempts to click back to the previously open file afterward, but the "restore" step is unverified — needs a live test with "Fetch file by name" against the `refs.bib` fixture to confirm both the fetch and the restore actually work end to end.
