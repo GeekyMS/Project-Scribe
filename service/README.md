@@ -81,3 +81,24 @@ exactly (recall/precision 0.9167, `hallucinated_keys: ["wong2024fake"]`,
 `missing_keys: ["fournier2015spans"]`); `/jobs/generate` produced real
 LaTeX with correctly-cited `\cite{}` keys pulled from the bib in ~11s for a
 small smoke-test paper.
+
+## Reproducibility check against a real prior campaign run (2026-09-05)
+
+Ran `/jobs/check` on a real paper already scored by `run_validation_campaign.py`
+(`research_test_with_phd/2503.07928v3` → `outputs/phase2_campaign/2503.07928v3/
+evaluation_report_2503.07928v3.json`), using that paper's real generated
+`.tex` and `.bib`, with the existing per-paper `enrichment_cache.json`
+merged into the service's cache so enrichment didn't have to re-resolve
+live (it did anyway — the cached statuses turned out non-retryable-eligible
+in a way that still triggered a live re-fetch; harmless, just re-confirms
+the same resolver outcome rather than reusing it).
+
+**Result: every field matched exactly** — Tier 1 (`bib_keys`, `cited_keys`,
+`hallucinated_keys`, `missing_keys`, recall/precision, citation counts) and
+Tier 4 (`total_spans`, `verifiable_count`, `evidence_coverage`,
+`support_rate`, `verdict_counts`, `unverifiable_reasons`), including every
+individual per-citation verdict across all 15 citation mentions. This is
+the plan's verification step 5 (service output should match
+`run_validation_campaign.py` on the same input) — confirmed: the service
+is not a fork of the evaluated pipeline's behavior, it's the same
+computation behind an HTTP job.
