@@ -89,4 +89,16 @@ raw JSON result here.
 **Chosen approach:** [ ] ideObject [x] file-tree DOM open-and-read [ ] socket/REST [ ] none worked
 
 **Notes:**
-`window._ide` and friends don't exist on this Overleaf version — that route is closed. `window.io` (Socket.IO) is present, which could support a REST/socket-based read later, but calling into an undocumented internal transport is more invasive than clicking a file open; kept as a fallback idea, not pursued. The file-tree DOM route is concretely viable: exact-text leaf matches exist and are trivially selectable. Implemented as `fetchFileByName()` in `content.js` — finds the leaf entry, records whatever's currently marked "selected" (best-effort; the actual "selected" class name is unconfirmed), clicks the target, polls `SCRIBE_PROBE`'s `pathA.hookFireCount` until it increments (proving Path A re-fired for the newly opened file, per the durability result in §4) rather than guessing a fixed delay, then reads via the existing `SCRIBE_READ`. Attempts to click back to the previously open file afterward, but the "restore" step is unverified — needs a live test with "Fetch file by name" against the `refs.bib` fixture to confirm both the fetch and the restore actually work end to end.
+`window._ide` and friends don't exist on this Overleaf version — that route is closed. `window.io` (Socket.IO) is present, which could support a REST/socket-based read later, but calling into an undocumented internal transport is more invasive than clicking a file open; kept as a fallback idea, not pursued. The file-tree DOM route is concretely viable: exact-text leaf matches exist and are trivially selectable. Implemented as `fetchFileByName()` in `content.js` — finds the leaf entry, records whatever's currently marked "selected" (best-effort; the actual "selected" class name is unconfirmed), clicks the target, polls `SCRIBE_PROBE`'s `pathA.hookFireCount` until it increments (proving Path A re-fired for the newly opened file, per the durability result in §4) rather than guessing a fixed delay, then reads via the existing `SCRIBE_READ`. Attempts to click back to the previously open file afterward.
+
+**Live test result (2026-09-04, `refs.bib` fixture, `main.tex` open beforehand):**
+```json
+{
+  "target": "refs.bib", "hookFired": true, "hookCountBefore": 1,
+  "previouslySelected": "main.tex", "restored": true,
+  "read": { "source": "A", "length": 3504, "lines": 102, "hash": "-508c73c8",
+    "head": "@article{chen2019graphattn,...", "tail": "...pages = {33--41}\n}\n",
+    "viewport": { "from": 1292, "to": 3504 } }
+}
+```
+Full pass, including the previously-unverified restore step: `previouslySelected` correctly captured `"main.tex"` (the "selected"-class guess was right), the hook re-fired for the newly opened `refs.bib`, the read returned genuine BibTeX content matching the fixture's real size (3504 chars), and the editor visibly returned to `main.tex` afterward. **Bib discovery from the real file tree is confirmed working end to end — no fallback to a comment-block bib is needed for the MVP.**
