@@ -125,9 +125,20 @@ _LATEX_CITE_RE = re.compile(
 
 # Author-date fallback for the markdown output path, e.g.
 # "(Smith et al., 2021)" or "(Smith & Jones, 2022)" or "Smith (2021)"
+#
+# The comma before the year is mandatory (not ",?"): a bare "Capitalized
+# word" + whitespace + "4 digits" with no comma is common in ordinary
+# text that isn't a citation at all — e.g. a LaTeX \paragraph{Paragraph
+# 0001} heading in a document with no \cite commands matched "Paragraph"
+# as a surname and "0001" as a year. Every real citation style this
+# fallback targets already has the comma; tightening it costs no known
+# recall (no output in outputs/ has ever exercised this fallback path —
+# it only runs when a document has zero \cite-family matches at all) and
+# eliminates a false-positive class found via a live extension test on a
+# .tex document with no \cite commands.
 _AUTHOR_DATE_RE = re.compile(
-    r'\(?\b([A-Z][A-Za-z\'\-]+)(?:\s+(?:et al\.|&|and)\s+[A-Z][A-Za-z\'\-]+)?'
-    r',?\s+(\d{4}[a-z]?)\)?'
+    r'\(?\b([A-Z][A-Za-z\'\-]+)(?:\s+et al\.|\s+(?:&|and)\s+[A-Z][A-Za-z\'\-]+)?'
+    r',\s+(\d{4}[a-z]?)\)?'
 )
 
 
