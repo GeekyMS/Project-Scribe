@@ -469,30 +469,57 @@
     summary.textContent = `Evidence coverage: ${(tier4.evidence_coverage * 100).toFixed(0)}% · support rate (of checked): ${tier4.support_rate != null ? (tier4.support_rate * 100).toFixed(0) + "%" : "n/a"}`;
     container.appendChild(summary);
 
+    // The same key can be cited multiple times with different verdicts —
+    // e.g. once in a detailed paragraph making a specific claim the
+    // abstract doesn't support, again in a vague summary sentence that
+    // trivially holds. That's the point of per-mention checking, not a
+    // bug, but showing bare "key: verdict" twice with no way to tell the
+    // mentions apart makes it look like a contradiction. Show which
+    // mention (via the sentence itself) each verdict is about.
+    //
+    // "unverifiable" mentions carry no judgment about the claim (see
+    // pipeline/evaluator.py's docstring: it means retrieval couldn't find
+    // enough evidence, not that the claim is false) — collapse them into
+    // one summary line instead of listing each one, so the informative
+    // verdicts aren't buried under noise.
+    const judged = tier4.per_citation.filter((c) => c.verdict !== "unverifiable");
+    const unverifiableCount = tier4.per_citation.length - judged.length;
+
+    const order = { contradicted: 0, unsupported: 1, partially_supported: 2, supported: 3 };
+    const sorted = [...judged].sort((a, b) => (order[a.verdict] ?? 4) - (order[b.verdict] ?? 4));
+
     const list = document.createElement("div");
-    list.style.cssText = "max-height:160px;overflow:auto;margin-top:4px;";
-    // Worst verdicts first, so contradicted/unsupported citations aren't
-    // buried at the bottom of a long list.
-    const order = { contradicted: 0, unsupported: 1, partially_supported: 2, unverifiable: 3, supported: 4 };
-    const sorted = [...tier4.per_citation].sort(
-      (a, b) => (order[a.verdict] ?? 5) - (order[b.verdict] ?? 5)
-    );
+    list.style.cssText = "max-height:220px;overflow:auto;margin-top:4px;";
     for (const c of sorted) {
       const row = document.createElement("div");
-      row.style.cssText = "padding:3px 0;border-bottom:1px solid #333;";
+      row.style.cssText = "padding:4px 0;border-bottom:1px solid #333;";
+      const ordinal = (c.citation_id || "").split("#")[1];
       const head = document.createElement("div");
-      head.appendChild(document.createTextNode(c.citation_key + " "));
+      head.appendChild(document.createTextNode(c.citation_key + (ordinal ? ` (mention ${ordinal}) ` : " ")));
       head.appendChild(badge(c.verdict, verdictColor(c.verdict)));
       row.appendChild(head);
+      if (c.sentence) {
+        const sentence = document.createElement("div");
+        sentence.style.cssText = "color:#bbb;font-size:11px;font-style:italic;margin-top:2px;";
+        sentence.textContent = c.sentence.length > 220 ? c.sentence.slice(0, 220) + "…" : c.sentence;
+        row.appendChild(sentence);
+      }
       if (c.justification) {
         const just = document.createElement("div");
-        just.style.cssText = "color:#999;font-size:11px;";
+        just.style.cssText = "color:#999;font-size:11px;margin-top:2px;";
         just.textContent = c.justification;
         row.appendChild(just);
       }
       list.appendChild(row);
     }
     container.appendChild(list);
+
+    if (unverifiableCount > 0) {
+      const note = document.createElement("div");
+      note.style.cssText = "color:#777;margin-top:4px;font-size:11px;";
+      note.textContent = `${unverifiableCount} other citation mention${unverifiableCount === 1 ? "" : "s"} could not be checked (not enough retrieved evidence — this says nothing about whether the claim is true).`;
+      container.appendChild(note);
+    }
   }
 
   // ---- Debug tools (the risk-spike panel, collapsed by default) -----------
