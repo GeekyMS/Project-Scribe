@@ -98,7 +98,18 @@ def _parse_dual_output(raw: str) -> tuple[str, str]:
             r'^(?:FORMAT\s*2\s*\(?Markdown\)?\s*:?\s*)',
             '', md_part, flags=re.IGNORECASE,
         ).strip()
-        
+
+        # The model sometimes wraps its own overall title above the
+        # requested format label, e.g. "## Related Work\n\n### FORMAT 1
+        # (LaTeX)\n\n\section{...}" -- the label-strip above is anchored
+        # at the very start, so it never matches when a title precedes it,
+        # and the markdown headers survive into latex_part. Found via a
+        # live extension test: an unescaped leading '#' is a LaTeX special
+        # character and broke the inserted output. Strip any leading block
+        # of markdown ATX-header lines (LaTeX output should never start
+        # with one) before returning.
+        latex_part = re.sub(r'^(?:#+.*\n+)+', '', latex_part).strip()
+
         return latex_part, md_part
     
     # No separator — try to detect format

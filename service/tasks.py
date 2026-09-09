@@ -46,6 +46,11 @@ def _parse_dual_output(raw: str) -> tuple[str, str]:
         parts = raw.split(separator, 1)
         latex_part = re.sub(r'^(?:FORMAT\s*1\s*\(?LaTeX\)?\s*:?\s*)', '', parts[0].strip(), flags=re.IGNORECASE).strip()
         md_part = re.sub(r'^(?:FORMAT\s*2\s*\(?Markdown\)?\s*:?\s*)', '', parts[1].strip(), flags=re.IGNORECASE).strip()
+        # See pipeline/generator.py::_parse_dual_output for why this is
+        # needed: the model sometimes wraps its own title above the format
+        # label, which the anchored strip above never catches, leaking a
+        # bare '#' -- a LaTeX special character -- into inserted output.
+        latex_part = re.sub(r'^(?:#+.*\n+)+', '', latex_part).strip()
         return latex_part, md_part
     if "\\cite{" in raw:
         return raw.strip(), ""
