@@ -219,8 +219,32 @@
           respond(requestId, type, null, "no view resolved by either path");
           return;
         }
-        const insertText = (payload && payload.text) || "%SCRIBE-SPIKE-TEST-INSERT%";
+        const requestedText = (payload && payload.text) || "%SCRIBE-SPIKE-TEST-INSERT%";
         const from = view.state.selection.main.head;
+        const doc = view.state.doc;
+
+        // Insert on its own blank line rather than running into whatever
+        // is already at the cursor — found via a live test where a draft
+        // landed mid-sentence as "...screen.## Related Work..." with no
+        // separation. Pads only what's missing (checks up to 2 characters
+        // each side for existing newlines) so re-running near an already
+        // blank line doesn't pile up extra blank lines.
+        const countTrailingNewlines = (s) => {
+          let n = 0;
+          for (let i = s.length - 1; i >= 0 && s[i] === "\n"; i--) n++;
+          return n;
+        };
+        const countLeadingNewlines = (s) => {
+          let n = 0;
+          for (let i = 0; i < s.length && s[i] === "\n"; i++) n++;
+          return n;
+        };
+        const before = doc.sliceString(Math.max(0, from - 2), from);
+        const after = doc.sliceString(from, Math.min(doc.length, from + 2));
+        const prefix = from === 0 ? "" : "\n".repeat(Math.max(0, 2 - countTrailingNewlines(before)));
+        const suffix = from === doc.length ? "" : "\n".repeat(Math.max(0, 2 - countLeadingNewlines(after)));
+        const insertText = prefix + requestedText + suffix;
+
         view.dispatch({ changes: { from, insert: insertText } });
         respond(requestId, type, {
           insertedAt: from,
