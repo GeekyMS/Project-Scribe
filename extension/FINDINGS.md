@@ -102,3 +102,19 @@ raw JSON result here.
 }
 ```
 Full pass, including the previously-unverified restore step: `previouslySelected` correctly captured `"main.tex"` (the "selected"-class guess was right), the hook re-fired for the newly opened `refs.bib`, the read returned genuine BibTeX content matching the fixture's real size (3504 chars), and the editor visibly returned to `main.tex` afterward. **Bib discovery from the real file tree is confirmed working end to end — no fallback to a comment-block bib is needed for the MVP.**
+
+---
+
+## 6. Real data loss found via file-switch-and-restore (2026-09-12)
+
+**This overturns part of §5's "confirmed working end to end."** §5 verified that `fetchFileByName()`'s restore step visually returns to the right file and reads back plausible content. It did **not** verify that the restored document is provably byte-identical to what it was before switching away — and in real end-to-end use (via the Draft/Check UI, not the raw debug button), it was not.
+
+**Symptom:** after one bib-fetch (switch to `refs.bib`, read, switch back to `main.tex`) followed by two Accept insertions, `SCRIBE_READ` on the live document reported `length: 141153` — **11,213 characters smaller than the original fixture (152,366) alone**, despite two insertions that each *added* several KB. Net: roughly 19,000–20,000 characters of real filler content (~33 paragraphs) were missing from the document. Confirmed via `SCRIBE_READ` (bypasses DOM virtualization) after the user reloaded the page and re-checked — not a copy-paste artifact from pulling a long document into a chat box (which was the first, wrong hypothesis, since Overleaf's CM6 DOM is virtualized and a naive "select all" could plausibly under-copy; `SCRIBE_READ`'s `length`/`hash` ruled that out).
+
+**Leading theory, not yet independently confirmed against Overleaf's own history/diff:** `fetchFileByName()` tears down and rebuilds the CodeMirror editor twice (switch to bib, switch back). The only things verified after restore were "does a working view resolve" and "does it read back *something* plausible" — never "is the restored buffer provably caught up with the server's true state before we act on it." If there's a window where a freshly remounted editor briefly holds a stale/partial local buffer, reading or writing during that window and letting Overleaf's real-time sync reconcile afterward could silently drop content that existed server-side but wasn't in our stale snapshot.
+
+**Fix:** `fetchFileByName()` now snapshots the open document's `length`/`hash` *before* switching away, waits for Path A's hook to re-fire on restore (previously only waited for the hook on the *target* switch, not the restore switch — also fixed), then re-reads and compares. `fetchBibContent()` throws if they don't match, refusing to hand back bib content for Draft/Check to act on rather than silently proceeding. This detects the failure mode instead of preventing whatever causes it — the underlying mechanism is still a theory, not confirmed.
+
+**Status: fix implemented, not yet live-tested.** Needs a fresh run: reload the extension and page, run Draft/Check (which will exercise the bib fetch once), and confirm either (a) the integrity check passes and no content goes missing, or (b) it correctly refuses and reports a mismatch instead of silently corrupting the document again. If it still corrupts silently, the snapshot-compare approach itself needs revisiting, not just this instance of it.
+
+**Open, unresolved:** whether the theorized "stale buffer after remount" mechanism is actually correct — never confirmed against Overleaf's own version history/diff for the affected edit. If this recurs, pulling up that diff before writing more code would give a definitive mechanism instead of a best-guess one.

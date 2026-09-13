@@ -94,37 +94,70 @@
     el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
   }
 
+  // Waits for Path A's hook to fire again (i.e. Overleaf actually rebuilt
+  // the editor for a newly-focused file) before trusting any read against
+  // it. Shared between switching to the target file and switching back,
+  // because both are real remounts and both need the same wait.
+  async function waitForNextHookFire(hookCountBefore, { timeoutMs = 4000, pollMs = 150 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await sleep(pollMs);
+      const probe = await callInject("SCRIBE_PROBE");
+      const count = probe.result && probe.result.pathA ? probe.result.pathA.hookFireCount : null;
+      if (hookCountBefore !== null && count !== null && count > hookCountBefore) return true;
+    }
+    return false;
+  }
+
   async function fetchFileByName(targetText, { timeoutMs = 4000, pollMs = 150 } = {}) {
     const before = await callInject("SCRIBE_PROBE");
     const hookCountBefore = before.result && before.result.pathA ? before.result.pathA.hookFireCount : null;
     const previouslySelected = findCurrentlySelectedEntryText();
+
+    // Snapshot the currently-open document BEFORE switching away, so we can
+    // prove on return that Overleaf's remount actually caught back up to
+    // the true state rather than leaving us reading/writing against a
+    // stale local buffer. Added after a live test where switching away to
+    // read a .bib and back silently lost ~20KB from the restored document
+    // -- SCRIBE_READ/SCRIBE_INSERT correctly acting on whatever view
+    // resolves is no protection if that view's own content is stale.
+    let preSwitchSnapshot = null;
+    if (previouslySelected) {
+      const preRead = await callInject("SCRIBE_READ");
+      if (preRead.result) {
+        preSwitchSnapshot = { length: preRead.result.length, hash: preRead.result.hash };
+      }
+    }
 
     const targets = findLeafEntriesByExactText(targetText);
     if (targets.length === 0) {
       return { error: `no file-tree entry found with exact text "${targetText}"`, previouslySelected };
     }
     clickEntry(targets[0]);
-
-    const deadline = Date.now() + timeoutMs;
-    let hookFired = false;
-    while (Date.now() < deadline) {
-      await sleep(pollMs);
-      const probe = await callInject("SCRIBE_PROBE");
-      const count = probe.result && probe.result.pathA ? probe.result.pathA.hookFireCount : null;
-      if (hookCountBefore !== null && count !== null && count > hookCountBefore) {
-        hookFired = true;
-        break;
-      }
-    }
+    const hookFired = await waitForNextHookFire(hookCountBefore, { timeoutMs, pollMs });
 
     const read = await callInject("SCRIBE_READ");
+    const hookCountAfterTargetRead = (await callInject("SCRIBE_PROBE")).result?.pathA?.hookFireCount ?? null;
 
     let restored = false;
+    let integrityCheck = null;
     if (previouslySelected) {
       const backTargets = findLeafEntriesByExactText(previouslySelected);
       if (backTargets.length > 0) {
         clickEntry(backTargets[0]);
         restored = true;
+        const restoreHookFired = await waitForNextHookFire(hookCountAfterTargetRead, { timeoutMs, pollMs });
+
+        if (preSwitchSnapshot) {
+          const postRead = await callInject("SCRIBE_READ");
+          const postSnapshot = postRead.result
+            ? { length: postRead.result.length, hash: postRead.result.hash }
+            : null;
+          const matches = !!postSnapshot
+            && postSnapshot.length === preSwitchSnapshot.length
+            && postSnapshot.hash === preSwitchSnapshot.hash;
+          integrityCheck = { preSwitchSnapshot, postSnapshot, matches, restoreHookFired };
+        }
       }
     }
 
@@ -136,6 +169,7 @@
       restored,
       read: read.result,
       readError: read.error,
+      integrityCheck,
     };
   }
 
@@ -152,6 +186,21 @@
     const fetchResult = await fetchFileByName(name);
     if (fetchResult.error || !fetchResult.read) {
       throw new Error(fetchResult.error || `could not read "${name}"`);
+    }
+    // Refuse to proceed if the document we switched away from didn't come
+    // back byte-identical -- see fetchFileByName's integrity check. Acting
+    // on (reading, generating from, or inserting into) a document that may
+    // have silently lost content is worse than stopping and asking the
+    // user to check it, even though we can't tell from here whether this
+    // is our bug or a legitimate concurrent edit by a collaborator.
+    const ic = fetchResult.integrityCheck;
+    if (ic && ic.matches === false) {
+      throw new Error(
+        `document changed while fetching "${name}" -- before: ${ic.preSwitchSnapshot.length} chars ` +
+        `(hash ${ic.preSwitchSnapshot.hash}), after restoring: ${ic.postSnapshot ? ic.postSnapshot.length : "?"} chars ` +
+        `(hash ${ic.postSnapshot ? ic.postSnapshot.hash : "?"}). Refusing to continue -- reload the page and check ` +
+        `your document (Overleaf's history) before retrying.`
+      );
     }
     return { name, content: fetchResult.read.text };
   }
