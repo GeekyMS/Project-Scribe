@@ -118,3 +118,12 @@ Full pass, including the previously-unverified restore step: `previouslySelected
 **Status: fix implemented, not yet live-tested.** Needs a fresh run: reload the extension and page, run Draft/Check (which will exercise the bib fetch once), and confirm either (a) the integrity check passes and no content goes missing, or (b) it correctly refuses and reports a mismatch instead of silently corrupting the document again. If it still corrupts silently, the snapshot-compare approach itself needs revisiting, not just this instance of it.
 
 **Open, unresolved:** whether the theorized "stale buffer after remount" mechanism is actually correct — never confirmed against Overleaf's own version history/diff for the affected edit. If this recurs, pulling up that diff before writing more code would give a definitive mechanism instead of a best-guess one.
+
+**Resolved (2026-09-16):** re-ran the fix against a freshly-pasted-in clean copy of `long_test.tex` (new baseline after fixture edits: `length: 154113`, `hash: "4cd6ca4e"`, 1002 lines as CodeMirror counts it). Full Draft → Check → Accept cycle with the service running:
+
+- Pre-Accept `SCRIBE_READ` (after the bib-fetch-and-restore) matched the baseline exactly: `154113`/`4cd6ca4e`. No corruption from the fetch this time.
+- Post-Accept `SCRIBE_READ`: `164112` chars, `+46` lines — consistent with a real ~10KB Related Work section added, no data lost.
+- No `document changed while fetching` error fired, consistent with the clean pre-Accept read.
+- Visual/source inspection confirmed the inserted `\section{Related Work}` landed cleanly on its own paragraph boundary (not mid-word/mid-sentence like the first broken run), with real `\citep{}`/`\citet{}` keys pulled from `refs.bib`, no duplication, both top/bottom markers intact.
+
+The integrity-check fix works as intended on this run. The underlying "stale buffer after remount" mechanism is still an unconfirmed theory — this result doesn't prove *why* the original corruption happened, only that the detection/refusal path added in response to it now passes cleanly when nothing goes wrong, and (per the fix's own design) would throw rather than silently corrupt if it happened again. Continued live testing is the only way to build confidence this doesn't recur under different timing.

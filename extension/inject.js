@@ -166,8 +166,35 @@
     };
   }
 
+  // ---- Bridge nonce ---------------------------------------------------
+  // content.js (isolated world) generates a random nonce and sends it once
+  // via scribe:init; every scribe:request must carry the matching nonce or
+  // is silently ignored. Without this, any page script — Overleaf's own
+  // or something it loads — could dispatch a fake scribe:request and use
+  // SCRIBE_INSERT to write into the document or SCRIBE_READ to exfiltrate
+  // it, since window events have no built-in sender authentication.
+  //
+  // This is a best-effort raise of the bar, not an airtight guarantee: it
+  // stops incidental/opportunistic interference, but a page script
+  // specifically engineered to race scribe:init before content.js's own
+  // (document_start vs document_idle timing makes this hard but not
+  // provably impossible) could still win. Locking onto the *first* value
+  // received means it can't be silently overridden after the real
+  // handshake completes, which is the more likely real-world case.
+  let bridgeNonce = null;
+  window.addEventListener("scribe:init", (event) => {
+    if (bridgeNonce === null) {
+      bridgeNonce = (event.detail && event.detail.nonce) || null;
+      console.log(LOG_PREFIX, "bridge nonce established");
+    }
+  });
+
   window.addEventListener("scribe:request", (event) => {
-    const { requestId, type, payload } = event.detail || {};
+    const { requestId, type, payload, nonce } = event.detail || {};
+    if (bridgeNonce === null || nonce !== bridgeNonce) {
+      console.warn(LOG_PREFIX, "rejected scribe:request with invalid/missing nonce", type);
+      return;
+    }
 
     try {
       if (type === "SCRIBE_PROBE_FILES") {
@@ -210,6 +237,34 @@
           tail: text.slice(-200),
           viewport: { from: view.viewport.from, to: view.viewport.to },
         });
+        return;
+      }
+
+      if (type === "SCRIBE_REVEAL") {
+        // Select a range and scroll it into view, so clicking a finding in
+        // the panel takes the user straight to the sentence instead of
+        // making them hunt for it in a 40KB .tex.
+        //
+        // Selection + scrollIntoView deliberately, not a Decoration mark:
+        // this needs only view.dispatch(), which is already proven working
+        // (see FINDINGS.md §3), whereas a persistent highlight would depend
+        // on StateField/Decoration being reachable through
+        // UNSTABLE_editor:extensions — never verified, since only
+        // EditorView has ever been used from that hook.
+        const view = pathAView || probePathB().view;
+        if (!view) {
+          respond(requestId, type, null, "no view resolved by either path");
+          return;
+        }
+        const len = view.state.doc.length;
+        // Clamp: content.js searches the document it last read, which can
+        // be shorter than the live one by the time this arrives. An
+        // out-of-range position throws inside CodeMirror.
+        const anchor = Math.max(0, Math.min(Number(payload && payload.from) || 0, len));
+        const head = Math.max(0, Math.min(Number(payload && payload.to) || 0, len));
+        view.dispatch({ selection: { anchor, head }, scrollIntoView: true });
+        view.focus();
+        respond(requestId, type, { from: anchor, to: head, docLength: len });
         return;
       }
 

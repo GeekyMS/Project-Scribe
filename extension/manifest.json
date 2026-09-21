@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Scribe for Overleaf",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drafts a Related Work section from your project's bibliography and checks whether cited papers actually support the claims made about them.",
   "content_scripts": [
     {
@@ -12,12 +12,22 @@
     },
     {
       "matches": ["https://www.overleaf.com/project/*"],
-      "js": ["lib/citations.js", "content.js"],
+      "js": ["lib/secrets.js", "lib/providers.js", "lib/citations.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
   "background": {
     "service_worker": "background.js"
   },
-  "host_permissions": ["http://127.0.0.1:8765/*"]
+  "permissions": ["storage"],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*",
+    "https://api.semanticscholar.org/*",
+    "https://api.crossref.org/*",
+    "https://api.openalex.org/*",
+    "https://openrouter.ai/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*"
+  ],
+  "optional_host_permissions": ["<all_urls>"]
 }

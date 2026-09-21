@@ -142,6 +142,19 @@ def needs_refetch(cached: dict | None, *, force: bool = False) -> bool:
     True if there is no cached entry, if force is set, if the entry
     predates the current resolver (so it was never title-gated /
     DOI-checked), or if its status is in the retryable set.
+
+    Deliberately does NOT consider evidence["full_text"]["status"].
+    This function has exactly one caller —
+    abstract_fetcher.enrich_entries — and that path resolves *abstracts*;
+    full_text_fetcher.py does its own cache accounting and never calls
+    here. The previous version returned True whenever full text was
+    "not_attempted", which resolve_entry() sets unconditionally and the
+    abstract path never changes, so every cached entry looked stale and
+    the cache never hit. service/README.md recorded the symptom ("the
+    cached statuses turned out non-retryable-eligible in a way that
+    still triggered a live re-fetch; harmless") without spotting that
+    the cache was simply inert — it is not harmless when the provider
+    starts rate-limiting.
     """
     if force or cached is None:
         return True
@@ -150,10 +163,5 @@ def needs_refetch(cached: dict | None, *, force: bool = False) -> bool:
     if evidence.get("resolver_version") != "1":
         return True
     if evidence.get("status") in _RETRYABLE_STATUSES:
-        return True
-    full_text_status = evidence.get("full_text", {}).get("status")
-    if full_text_status in ("download_failed", "extract_failed", "not_attempted"):
-        # Full text is worth another attempt even if the abstract
-        # resolved fine — it's the more valuable evidence source.
         return True
     return False

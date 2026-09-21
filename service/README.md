@@ -61,6 +61,18 @@ repeat requests on the same bibliography don't re-pay retrieval latency —
 except for entries that never resolve, which stay retryable by design
 (see `evidence_cache.needs_refetch`) and get re-attempted every run.
 
+**Fixed 2026-09-20 — the cache was inert until now.** The note below
+(under the reproducibility check) recorded that a run with a warm cache
+"did anyway" re-fetch live and called it harmless. It was not a quirk:
+`needs_refetch` also returned True whenever `evidence.full_text.status`
+was `"not_attempted"`, which `resolvers.resolve_entry` sets
+unconditionally and the abstract-enrichment path never updates. So every
+cached entry looked stale and **no cache hit was ever possible**, in
+this service or in the extension's IndexedDB port of it. Surfaced when
+the extension began hitting provider rate limits and 15-minute job
+timeouts on a 64-entry bibliography that it was re-fetching from scratch
+on every single Check.
+
 ## Manual smoke test
 
 ```bash

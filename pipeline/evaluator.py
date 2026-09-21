@@ -952,6 +952,13 @@ def evaluate_evidence_support(
             "citation_key": span.key,
             "sentence_index": span.sentence_index,
             "sentence": span.sentence,
+            # Offsets into the checked text. Consumed by the Overleaf
+            # extension's click-to-reveal as a hint for which occurrence of
+            # a repeated sentence to jump to; it locates by searching the
+            # live document, so these are an optimisation, not a
+            # requirement. Kept in sync with extension/lib/evaluator.js.
+            "char_start": span.char_start,
+            "char_end": span.char_end,
             "co_cited_keys": span.co_cited_keys,
             "style": span.style,
             "resolution": span.resolution,

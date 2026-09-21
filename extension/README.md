@@ -1,5 +1,47 @@
 # Scribe Overleaf Risk Spike
 
+## Status (2026-09-17): JS-in-extension pipeline port
+
+The Draft/Check pipeline (bib parsing, Semantic Scholar/Crossref/OpenAlex
+resolution, citation-span/Tier-1 checking, Tier-4 evidence-support judging,
+generation) has been ported from the Python service into the extension
+itself — `extension/lib/citationSpans.js`, `resolvers.js`, `bibEnrichment.js`,
+`enrichmentCache.js` (IndexedDB), `genPrompts.js`, `evaluator.js`,
+`providers.js`/`llmProviders.js` (provider-agnostic LLM adapter —
+OpenRouter/OpenAI/Anthropic presets + a "Custom" OpenAI-shaped base URL),
+and `generate.js`, all loaded into `background.js` via `importScripts`.
+No local Python server is required for the default flow any more; the user
+configures their own provider + API key + model via the gear-icon settings
+panel in the extension UI.
+
+**Two deterministic pieces were verified against the live Python pipeline
+this session** (see `~/.claude/plans/zazzy-jumping-swan.md`'s verification
+section): `parseBibContent` + `findCitationSpans` + `evaluateCitations`
+produced an exact field-by-field match against `pipeline.evaluator
+.evaluate_citations()` on `test-fixtures/long_test.tex` + `refs.bib`
+(recall/precision 0.9167, `hallucinated_keys: ["wong2024fake"]`,
+`missing_keys: ["fournier2015spans"]`); and the from-scratch port of
+`difflib.SequenceMatcher.ratio()` in `resolvers.js` matched Python's output
+exactly across 5 test string pairs.
+
+**What has NOT been live-tested yet** (no browser/Overleaf session was
+available to this change): the network-dependent pieces — `resolvers.js`'s
+actual HTTP calls to Semantic Scholar/Crossref/OpenAlex, the LLM provider
+adapter's real calls to OpenRouter/OpenAI/Anthropic, the full
+Draft/Check/Accept cycle through `background.js`'s in-process job store, the
+settings UI's save/test-key/provider-switch flows, `chrome.storage.session`
+surviving a forced service-worker restart, and the bridge nonce actually
+rejecting a forged `scribe:request`. Needs a fresh `chrome://extensions`
+reload and a real run before any of this is treated as confirmed — same
+discipline as every other finding in this file.
+
+`service/` (the Python service) still exists and still works — kept
+deliberately as an optional dev/debug and cross-validation tool (e.g.
+comparing this JS pipeline's output against the Python service's on the
+same input), not because the extension depends on it any more.
+
+---
+
 Not a product. This measures whether a durable handle on Overleaf's live
 CodeMirror 6 `EditorView` is reachable, complete (full document regardless of
 scroll position), and writable (edits persist through Overleaf's sync), and
