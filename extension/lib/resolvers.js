@@ -94,16 +94,21 @@
   }
 
   // ── HTTP helper ──
+  // Each fetch is bounded: a hung/stalled resolver response otherwise blocks
+  // the sequential per-entry enrichment loop indefinitely, since there's no
+  // other retry or timeout above this to notice.
+  const REQUEST_TIMEOUT_MS = 20000;
+
   async function getJson(url, params, { headers } = {}) {
     const qs = new URLSearchParams(
       Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== null && v !== "")
     ).toString();
     const fullUrl = qs ? `${url}?${qs}` : url;
     try {
-      let resp = await fetch(fullUrl, { headers });
+      let resp = await fetch(fullUrl, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       if (resp.status === 429) {
         await new Promise((r) => setTimeout(r, 10000));
-        resp = await fetch(fullUrl, { headers });
+        resp = await fetch(fullUrl, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       }
       if (resp.status !== 200) return [null, resp.status, `HTTP ${resp.status}`];
       return [await resp.json(), resp.status, null];

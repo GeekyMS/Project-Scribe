@@ -231,14 +231,33 @@
     return result;
   }
 
-  async function pollJob(jobId, onProgress, { intervalMs = 1500, maxWaitMs = 15 * 60 * 1000 } = {}) {
-    const deadline = Date.now() + maxWaitMs;
+  // A large bibliography (many uncached references, many citation-span
+  // batches) can legitimately take well past any fixed overall timeout --
+  // the work is sequential and scales with citation count, not with wall
+  // clock time. So instead of one fixed deadline for the whole job, this
+  // times out on *stalls*: the clock only resets while progress.done (or
+  // progress.stage) is still advancing, and fires if nothing moves for
+  // stallMs. A stuck job still gets caught; a big-but-healthy one doesn't.
+  // stallMs must comfortably exceed the longest gap between progress ticks
+  // that a single *healthy* unit of work can produce: a judge batch retries
+  // up to twice at 180s each plus a 10s delay (~370s) before its progress
+  // callback fires, and a generation attempt can run up to 300s before its
+  // retry re-fires progress. 8 minutes clears both with margin.
+  async function pollJob(jobId, onProgress, { intervalMs = 1500, stallMs = 8 * 60 * 1000 } = {}) {
+    let deadline = Date.now() + stallMs;
+    let lastKey = null;
     while (Date.now() < deadline) {
       const { result, error } = await sendToBackground("SCRIBE_POLL_JOB", { jobId });
       if (error) throw new Error(error);
       if (onProgress) onProgress(result.progress);
       if (result.status === "done") return result.result;
       if (result.status === "error") throw new Error(result.error || "job failed");
+      const p = result.progress || {};
+      const key = `${p.stage || ""}:${p.done ?? ""}`;
+      if (key !== lastKey) {
+        lastKey = key;
+        deadline = Date.now() + stallMs;
+      }
       await sleep(intervalMs);
     }
     // The job itself is detached (background.js fires the runner and
@@ -247,8 +266,8 @@
     // resumes rather than restarting — worth saying, because the bare
     // message reads as though the work was lost.
     throw new Error(
-      "timed out after 15 min waiting for the job. Enrichment keeps running " +
-      "in the background and caches each reference as it resolves, so running " +
+      `no progress for ${Math.round(stallMs / 60000)} min -- the job appears stuck. Enrichment keeps ` +
+      "running in the background and caches each reference as it resolves, so running " +
       "Check again will pick up where this left off instead of starting over."
     );
   }

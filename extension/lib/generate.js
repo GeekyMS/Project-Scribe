@@ -49,6 +49,7 @@
         raw = await self.ScribeLLM.chatComplete({
           provider, apiKey, baseUrl, model,
           messages: [{ role: "user", content: prompt }],
+          timeoutMs: 300000,
         });
       } catch (e) {
         if (attempt < MAX_RETRIES) { await sleep(RETRY_DELAY_MS); continue; }

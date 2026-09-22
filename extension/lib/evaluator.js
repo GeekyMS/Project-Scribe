@@ -80,6 +80,7 @@
           provider, apiKey, baseUrl, model,
           messages: [{ role: "user", content: prompt }],
           jsonMode: true,
+          timeoutMs,
         });
       } catch (e) {
         if (attempt < MAX_RETRIES) {
@@ -120,7 +121,7 @@
     generatedText,
     bibEntries,
     enrichedEntries,
-    { provider, apiKey, baseUrl, model, maxFullTextChars = 6000, batchSize = 8 } = {}
+    { provider, apiKey, baseUrl, model, maxFullTextChars = 6000, batchSize = 8, progress } = {}
   ) {
     const result = {
       per_citation: [], support_rate: 0, verifiable_count: 0, unverifiable_count: 0,
@@ -214,12 +215,14 @@
     }
 
     let nBatches = 0;
+    const totalBatches = Math.ceil(verifiableItems.length / batchSize);
     for (let batchStart = 0; batchStart < verifiableItems.length; batchStart += batchSize) {
       const batch = verifiableItems.slice(batchStart, batchStart + batchSize);
       if (batch.length === 0) continue;
       nBatches++;
       const prompt = self.ScribeGenPrompts.buildEvidenceSupportPrompt(batch);
       const [data, error] = await callJudge(prompt, { provider, apiKey, baseUrl, model, timeoutMs: 180000 });
+      if (progress) progress(nBatches, totalBatches);
 
       if (!data) {
         for (const item of batch) {

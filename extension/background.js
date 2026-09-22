@@ -145,6 +145,7 @@ async function runCheckJob(job, body) {
   job.progress = { stage: "checking_evidence_support", done: 0, total: 1 };
   const tier4 = await self.ScribeEvaluator.evaluateEvidenceSupport(body.text, bibEntries, enriched, {
     provider: judgeCfg.provider, apiKey: judgeCfg.apiKey, baseUrl: judgeCfg.baseUrl, model: judgeCfg.model,
+    progress: (done, total) => { job.progress = { stage: "checking_evidence_support", done, total }; },
   });
 
   job.progress = { stage: "done", done: 1, total: 1 };
