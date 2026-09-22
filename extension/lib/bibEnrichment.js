@@ -1,12 +1,10 @@
 // Port of pipeline/abstract_fetcher.py's parse_bib_content + enrich_entries.
-// Runs in background.js's service worker; uses resolvers.js (HTTP) and
-// enrichmentCache.js (IndexedDB) directly rather than through messages,
-// since all three live in the same worker context.
+// Runs in background.js's service worker; uses resolvers.js (HTTP, via
+// lib/rateLimiter.js + lib/httpClient.js) and enrichmentCache.js
+// (IndexedDB) directly rather than through messages, since all three live
+// in the same worker context.
 
 (() => {
-  const RATE_S2_UNAUTH = 3000; // ms — see abstract_fetcher.py's RATE_S2_UNAUTH
-  const RATE_S2_AUTH = 1000;
-
   function parseBibContent(text) {
     const entries = [];
     const entryRe = /@(\w+)\s*\{([^,]+),\s*([\s\S]*?)\n\}/g;
@@ -34,40 +32,65 @@
     return entries;
   }
 
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
   // progress(done, total, key, status) — mirrors abstract_fetcher.py's
-  // enrich_entries progress callback shape.
+  // enrich_entries progress callback shape. `done`/`total` count cache
+  // hits too (they're counted up front) so the caller's progress bar
+  // reflects the whole bibliography, not just the entries that needed a
+  // network round trip.
+  //
+  // Resolution itself goes through ScribeResolvers.resolveBatch, which
+  // partitions entries by identifier and issues a handful of batched
+  // provider requests instead of one request per entry — there is no
+  // per-entry sleep() here any more; pacing belongs entirely to
+  // lib/rateLimiter.js, which a blanket delay in this loop can't see or
+  // adapt (it doesn't know which entries actually cost a request, and it
+  // can't be told to back off after a 429 the way the limiter can).
   async function enrichEntries(bibEntries, cfg = {}, { forceRefresh = false, progress } = {}) {
-    const { mailto, s2ApiKey, openalexApiKey } = cfg;
-    const rateDelay = s2ApiKey ? RATE_S2_AUTH : RATE_S2_UNAUTH;
-    const resolveCfg = { mailto, s2ApiKey, openalexApiKey };
+    const resolveCfg = { mailto: cfg.mailto, s2ApiKey: cfg.s2ApiKey, openalexApiKey: cfg.openalexApiKey };
+    const total = bibEntries.length;
 
-    const enriched = [];
+    const cachedByKey = new Map();
+    const toResolve = []; // { entry, key }
     for (let i = 0; i < bibEntries.length; i++) {
       const entry = bibEntries[i];
       const key = entry.key || `entry_${i}`;
       const cached = await self.ScribeEnrichmentCache.getEntry(key);
-      const needsFetch = self.ScribeEnrichmentCache.needsRefetch(cached, { force: forceRefresh });
-
-      let result;
-      if (!needsFetch && cached) {
-        result = cached;
+      if (!forceRefresh && cached && !self.ScribeEnrichmentCache.needsRefetch(cached, { force: forceRefresh })) {
+        cachedByKey.set(key, cached);
       } else {
-        result = await self.ScribeResolvers.resolveEntry(entry, resolveCfg);
+        toResolve.push({ entry, key });
+      }
+    }
+
+    let done = 0;
+    for (const [key, cached] of cachedByKey) {
+      done += 1;
+      if (progress) progress(done, total, key, cached.evidence.status);
+    }
+
+    if (toResolve.length > 0) {
+      const resolvedList = await self.ScribeResolvers.resolveBatch(
+        toResolve.map((t) => t.entry),
+        resolveCfg,
+        {
+          onProgress: (_n, _batchTotal, key, status) => {
+            done += 1;
+            if (progress) progress(done, total, key, status);
+          },
+        }
+      );
+
+      for (let i = 0; i < toResolve.length; i++) {
+        const { key } = toResolve[i];
+        const result = resolvedList[i];
         result.key = key; // keyPath for IndexedDB
         result.evidence.fetched_at = new Date().toISOString();
         await self.ScribeEnrichmentCache.saveEntry(result);
-        await sleep(result.evidence.attempts && result.evidence.attempts.length ? rateDelay : 50);
+        cachedByKey.set(key, result);
       }
-
-      enriched.push(result);
-      if (progress) progress(i + 1, bibEntries.length, key, result.evidence.status);
     }
 
-    return enriched;
+    return bibEntries.map((entry, i) => cachedByKey.get(entry.key || `entry_${i}`));
   }
 
   self.ScribeBibEnrichment = { parseBibContent, enrichEntries };

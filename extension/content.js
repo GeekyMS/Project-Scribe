@@ -303,7 +303,13 @@
       return { mode: "offline", tier1: offline, offlineReason: ready.reason, source };
     }
     const result = await startAndAwaitJob("/jobs/check", { text, bib_content: bibContent }, onProgress);
-    return { mode: "full", tier1: result.tier_1_citation_metrics, tier4: result.tier_4_evidence_support, source };
+    return {
+      mode: "full",
+      tier1: result.tier_1_citation_metrics,
+      tier4: result.tier_4_evidence_support,
+      retrievalKeys: result.retrieval_keys,
+      source,
+    };
   }
 
   // ---- Panel ----------------------------------------------------------
@@ -982,6 +988,21 @@
     // checked out clean (rows empty, collapsed behind a toggle so the
     // panel isn't cluttered when there's nothing to act on).
     const totalChecked = rows.length + unverifiableRows.length;
+
+    // Without retrieval API keys, most evidence lookups are silently
+    // rate-limited rather than genuinely absent — surface that plainly
+    // rather than letting a degraded run look like clean "no evidence"
+    // findings for papers that do have abstracts available.
+    const missingKeys = checkResult.retrievalKeys
+      ? Object.entries(checkResult.retrievalKeys).filter(([, present]) => !present).map(([id]) => id)
+      : [];
+    if (missingKeys.length > 0) {
+      const labels = { s2: "Semantic Scholar", openalex: "OpenAlex" };
+      const warning = document.createElement("div");
+      warning.style.cssText = "color:var(--scribe-warning,#b45309);background:var(--scribe-warning-bg,#fef3c7);border-radius:4px;padding:6px 8px;margin:4px 0 8px;font-size:11px;";
+      warning.textContent = `No API key set for ${missingKeys.map((k) => labels[k] || k).join(" or ")} — expect many citations to show "no evidence" due to rate limiting, not because the paper actually lacks one. Add a free key in Settings.`;
+      container.appendChild(warning);
+    }
 
     if (tier4) {
       const summary = document.createElement("div");

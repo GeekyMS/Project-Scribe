@@ -13,7 +13,13 @@
   const STORE_NAME = "entries";
   const DB_VERSION = 1;
 
-  const RETRYABLE_STATUSES = new Set(["unresolved", "not_found", "fetch_error", "error"]);
+  // "unresolved_incomplete" (added alongside the outcome-tracking rewrite of
+  // resolvers.js) marks an entry where at least one provider attempt was
+  // inconclusive — rate limited, network error, timeout — rather than a
+  // confirmed "no such paper". Retrying it is exactly the fix for the bug
+  // that made this set necessary in the first place: a transient failure
+  // must never harden into a permanent non-result.
+  const RETRYABLE_STATUSES = new Set(["unresolved", "unresolved_incomplete", "not_found", "fetch_error", "error"]);
 
   let dbPromise = null;
   function openDb() {
@@ -90,6 +96,14 @@
     const evidence = cached.evidence || {};
     if (evidence.resolver_version !== "1") return true;
     if (RETRYABLE_STATUSES.has(evidence.status)) return true;
+    // A matched paper can still have had_inconclusive_attempt === true —
+    // e.g. it matched via one provider while another was rate-limited
+    // partway through the abstract lookup. That is a "we don't actually
+    // know yet" result being reported as abstract_chars: 0, not a
+    // confirmed "this paper has no abstract" — the exact failure mode
+    // that used to cache ~90 papers as permanently evidence-less after a
+    // transient 429. Retry it like any other inconclusive result.
+    if (evidence.had_inconclusive_attempt) return true;
     return false;
   }
 

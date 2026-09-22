@@ -20,6 +20,8 @@ importScripts(
   "lib/providers.js",
   "lib/settingsStore.js",
   "lib/citationSpans.js",
+  "lib/rateLimiter.js",
+  "lib/httpClient.js",
   "lib/resolvers.js",
   "lib/enrichmentCache.js",
   "lib/bibEnrichment.js",
@@ -136,8 +138,17 @@ async function runCheckJob(job, body) {
   job.progress = { stage: "checking_citation_keys", done: 0, total: 1 };
   const tier1 = self.ScribeEvaluator.evaluateCitations(body.text, bibEntries);
 
-  job.progress = { stage: "enriching_references", done: 0, total: bibEntries.length };
-  const enriched = await self.ScribeBibEnrichment.enrichEntries(bibEntries, retrievalCfg, {
+  // Only enrich entries the document actually cites — tier1 already knows
+  // which keys those are. A .bib can carry many more entries (a shared
+  // Zotero export, leftovers from an earlier draft) than the current
+  // document cites, and enriching all of them was the single largest
+  // contributor to job wall-clock and to burning through provider rate
+  // limits on papers nothing here references.
+  const citedKeySet = new Set(tier1.cited_keys || []);
+  const citedBibEntries = bibEntries.filter((e) => citedKeySet.has(e.key));
+
+  job.progress = { stage: "enriching_references", done: 0, total: citedBibEntries.length };
+  const enriched = await self.ScribeBibEnrichment.enrichEntries(citedBibEntries, retrievalCfg, {
     progress: (done, total, key) => { job.progress = { stage: "enriching_references", done, total, current_key: key }; },
   });
 
@@ -149,7 +160,16 @@ async function runCheckJob(job, body) {
   });
 
   job.progress = { stage: "done", done: 1, total: 1 };
-  job.result = { tier_1_citation_metrics: tier1, tier_4_evidence_support: tier4 };
+  job.result = {
+    tier_1_citation_metrics: tier1,
+    tier_4_evidence_support: tier4,
+    // Unauthenticated Semantic Scholar throttles roughly half of requests
+    // (shared global anonymous pool) and OpenAlex requires a key at all as
+    // of Feb 2026 — without these, expect most resolutions to be degraded
+    // by rate limiting rather than genuinely absent evidence. Surfaced so
+    // the panel can say so instead of silently under-reporting evidence.
+    retrieval_keys: { s2: !!retrievalCfg.s2ApiKey, openalex: !!retrievalCfg.openalexApiKey },
+  };
 }
 
 function runJsJob(path, body) {
