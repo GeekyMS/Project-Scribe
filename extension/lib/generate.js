@@ -46,11 +46,12 @@
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       if (onProgress) onProgress({ stage: "generating", done: attempt - 1, total: MAX_RETRIES });
       try {
-        raw = await self.ScribeLLM.chatComplete({
+        const response = await self.ScribeLLM.chatComplete({
           provider, apiKey, baseUrl, model,
           messages: [{ role: "user", content: prompt }],
           timeoutMs: 300000,
         });
+        raw = response && response.text;
       } catch (e) {
         if (attempt < MAX_RETRIES) { await sleep(RETRY_DELAY_MS); continue; }
         throw e;

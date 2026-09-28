@@ -72,16 +72,29 @@
   // out of the raw response rather than trusting response_format alone
   // (Anthropic has no response_format equivalent, and even OpenAI-shaped
   // providers occasionally wrap JSON in prose despite the instruction).
+  // `prompt` is either a plain string (sent as a user message, no system
+  // prompt — the shape every other caller uses) or { system, user } for
+  // evaluateEvidenceSupport's case, where system is the static instructions
+  // block shared across every batch of a job and is marked as an Anthropic
+  // cache_control breakpoint (cacheSystem: true) so only the first batch
+  // pays full price for it.
   async function callJudge(prompt, { provider, apiKey, baseUrl, model, timeoutMs = 180000 }) {
+    const isSplit = prompt && typeof prompt === "object";
+    const messages = isSplit
+      ? [{ role: "system", content: prompt.system }, { role: "user", content: prompt.user }]
+      : [{ role: "user", content: prompt }];
+
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       let raw;
       try {
-        raw = await self.ScribeLLM.chatComplete({
+        const response = await self.ScribeLLM.chatComplete({
           provider, apiKey, baseUrl, model,
-          messages: [{ role: "user", content: prompt }],
+          messages,
           jsonMode: true,
+          cacheSystem: isSplit,
           timeoutMs,
         });
+        raw = response && response.text;
       } catch (e) {
         if (attempt < MAX_RETRIES) {
           await sleep(RETRY_DELAY_MS);
@@ -121,7 +134,13 @@
     generatedText,
     bibEntries,
     enrichedEntries,
-    { provider, apiKey, baseUrl, model, maxFullTextChars = 6000, batchSize = 8, progress } = {}
+    // 6000 was tuned for the pre-Phase-3 world where full_text was always
+    // "" and this only ever bounded an abstract. Phase 3's section-targeted
+    // extraction (Abstract + Results/Experiments + Conclusion + tables)
+    // typically runs ~15-20k chars — measured live on a real 64-entry
+    // bibliography — so the old default would silently truncate away
+    // exactly the Results/Tables section a numeric claim needs to check.
+    { provider, apiKey, baseUrl, model, maxFullTextChars = 24000, batchSize = 8, progress } = {}
   ) {
     const result = {
       per_citation: [], support_rate: 0, verifiable_count: 0, unverifiable_count: 0,
@@ -166,6 +185,12 @@
         resolution: span.resolution,
         evidence_kind: "none",
         evidence_status: null,
+        // Distinguishes "this paper's evidence attempt was genuinely
+        // inconclusive (rate limited, network error, ...)" from "the
+        // paper conclusively has no abstract" — the panel uses this so
+        // "no evidence" doesn't read as a fact about the paper when it
+        // may really be a fact about a throttled request.
+        evidence_inconclusive: false,
         evidence_chars: 0,
         claim: null,
         claim_type: null,
@@ -187,6 +212,7 @@
 
       const evidenceStatus = (entry.evidence || {}).status;
       row.evidence_status = evidenceStatus;
+      row.evidence_inconclusive = !!(entry.evidence || {}).had_inconclusive_attempt;
 
       if (LOW_CONFIDENCE_STATUSES.has(evidenceStatus)) {
         row.verdict_source = "low_confidence_match";
@@ -214,13 +240,30 @@
       });
     }
 
+    // Group by paper key before chunking so citations about the same
+    // paper land in the same batch instead of wherever they happened to
+    // fall in document order — genPrompts.js's buildEvidenceSupportPrompt
+    // then emits that paper's evidence text once per batch instead of
+    // once per citation, and it's what gives prompt caching (see
+    // llmProviders.js) a stable block to actually reuse.
+    const orderedKeys = [];
+    const itemsByKey = new Map();
+    for (const item of verifiableItems) {
+      if (!itemsByKey.has(item.key)) { itemsByKey.set(item.key, []); orderedKeys.push(item.key); }
+      itemsByKey.get(item.key).push(item);
+    }
+    const orderedItems = orderedKeys.flatMap((k) => itemsByKey.get(k));
+
     let nBatches = 0;
-    const totalBatches = Math.ceil(verifiableItems.length / batchSize);
-    for (let batchStart = 0; batchStart < verifiableItems.length; batchStart += batchSize) {
-      const batch = verifiableItems.slice(batchStart, batchStart + batchSize);
+    const totalBatches = Math.ceil(orderedItems.length / batchSize);
+    for (let batchStart = 0; batchStart < orderedItems.length; batchStart += batchSize) {
+      const batch = orderedItems.slice(batchStart, batchStart + batchSize);
       if (batch.length === 0) continue;
       nBatches++;
-      const prompt = self.ScribeGenPrompts.buildEvidenceSupportPrompt(batch);
+      const prompt = {
+        system: self.ScribeGenPrompts.buildEvidenceSupportSystemPrompt(),
+        user: self.ScribeGenPrompts.buildEvidenceSupportUserPrompt(batch),
+      };
       const [data, error] = await callJudge(prompt, { provider, apiKey, baseUrl, model, timeoutMs: 180000 });
       if (progress) progress(nBatches, totalBatches);
 

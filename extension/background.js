@@ -23,7 +23,9 @@ importScripts(
   "lib/rateLimiter.js",
   "lib/httpClient.js",
   "lib/resolvers.js",
+  "lib/fullText.js",
   "lib/enrichmentCache.js",
+  "lib/retrievalStats.js",
   "lib/bibEnrichment.js",
   "lib/genPrompts.js",
   "lib/llmProviders.js",
@@ -152,6 +154,15 @@ async function runCheckJob(job, body) {
     progress: (done, total, key) => { job.progress = { stage: "enriching_references", done, total, current_key: key }; },
   });
 
+  // Abstracts alone can't check a claim like "reports 3.2 BLEU on WMT14" —
+  // fetch real section/table text (arXiv HTML / Europe PMC) for whatever
+  // matched. Only runs against the already-cited, already-matched subset,
+  // so this is bounded by the same citedBibEntries filter above.
+  job.progress = { stage: "fetching_full_text", done: 0, total: enriched.length };
+  await self.ScribeBibEnrichment.hydrateFullText(enriched, {
+    progress: (done, total, key) => { job.progress = { stage: "fetching_full_text", done, total, current_key: key }; },
+  });
+
   const judgeCfg = await resolveActiveProviderConfig("judge", settings);
   job.progress = { stage: "checking_evidence_support", done: 0, total: 1 };
   const tier4 = await self.ScribeEvaluator.evaluateEvidenceSupport(body.text, bibEntries, enriched, {
@@ -259,11 +270,15 @@ async function testKey({ providerId, apiKey, keyId, baseUrl, model }) {
   }
 }
 
-// ---- Keep-alive: a connected port prevents Chrome from idling this ------
-// worker out mid-job. content.js opens one for the duration of a job; this
-// listener just needs to exist so the connection is accepted.
+// ---- Keep-alive: traffic on a connected port resets the service worker's
+// idle timer. content.js opens one for the duration of a job and sends a
+// ping every ~15s (see startAndAwaitJob) — merely holding the connection
+// open does NOT keep the worker alive by itself; Chrome resets the idle
+// timer on port *messages*, not on connection state, so this listener must
+// actually receive them, not just accept the connection.
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "scribe-job") return;
+  port.onMessage.addListener(() => {});
   port.onDisconnect.addListener(() => {});
 });
 
@@ -286,6 +301,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (type === "SCRIBE_JS_READY") {
     jsReadiness()
+      .then((result) => sendResponse({ result, error: null }))
+      .catch((err) => sendResponse({ result: null, error: String(err) }));
+    return true;
+  }
+
+  if (type === "SCRIBE_RETRIEVAL_STATS") {
+    self.ScribeRetrievalStats.computeStats()
       .then((result) => sendResponse({ result, error: null }))
       .catch((err) => sendResponse({ result: null, error: String(err) }));
     return true;

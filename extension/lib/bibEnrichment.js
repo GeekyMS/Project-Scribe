@@ -54,7 +54,12 @@
     for (let i = 0; i < bibEntries.length; i++) {
       const entry = bibEntries[i];
       const key = entry.key || `entry_${i}`;
-      const cached = await self.ScribeEnrichmentCache.getEntry(key);
+      // Pass whatever DOI/arXiv id the raw BibTeX entry already carries —
+      // this is what lets a paper cited under a different key in another
+      // project (or a different key after a .bib cleanup) hit the cache
+      // instead of re-resolving from scratch.
+      const identifiers = self.ScribeResolvers.identifiersOf(entry);
+      const cached = await self.ScribeEnrichmentCache.getEntry(key, identifiers);
       if (!forceRefresh && cached && !self.ScribeEnrichmentCache.needsRefetch(cached, { force: forceRefresh })) {
         cachedByKey.set(key, cached);
       } else {
@@ -93,5 +98,34 @@
     return bibEntries.map((entry, i) => cachedByKey.get(entry.key || `entry_${i}`));
   }
 
-  self.ScribeBibEnrichment = { parseBibContent, enrichEntries };
+  // Fetches structured full text (arXiv HTML / Europe PMC JATS — see
+  // lib/fullText.js) for already-enriched, matched entries that don't
+  // have it cached yet, and writes it onto the entry in place: a plain
+  // string at entry.full_text (what evaluator.js's entryEvidenceKind
+  // reads) plus status/source/chars metadata at entry.evidence.full_text.
+  // Only matched entries are worth trying — an unresolved one has no
+  // identifier to look full text up by. Skips entries whose
+  // evidence.full_text.status is already "ok" so re-checking a document
+  // doesn't re-fetch every paper's full text every time.
+  async function hydrateFullText(enrichedEntries, { progress } = {}) {
+    const candidates = enrichedEntries.filter((e) => {
+      if (!e || !e.evidence || !e.evidence.status) return false;
+      if (!e.evidence.status.startsWith("matched") && !e.evidence.status.startsWith("resolved")) return false;
+      return (e.evidence.full_text || {}).status !== "ok";
+    });
+
+    let done = 0;
+    for (const entry of candidates) {
+      const result = await self.ScribeFullText.fetchFullText(entry);
+      entry.evidence.full_text = { status: result.status, source: result.source, source_url: result.source_url || "", chars: result.chars, error: result.error };
+      if (result.status === "ok") entry.full_text = result.targeted_text;
+      done += 1;
+      if (progress) progress(done, candidates.length, entry.key, result.status);
+      if (entry.key) await self.ScribeEnrichmentCache.saveEntry(entry);
+    }
+
+    return enrichedEntries;
+  }
+
+  self.ScribeBibEnrichment = { parseBibContent, enrichEntries, hydrateFullText };
 })();

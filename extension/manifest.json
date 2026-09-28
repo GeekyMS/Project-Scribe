@@ -19,12 +19,16 @@
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["storage"],
+  "permissions": ["storage", "offscreen", "alarms"],
   "host_permissions": [
     "http://127.0.0.1:8765/*",
     "https://api.semanticscholar.org/*",
     "https://api.crossref.org/*",
     "https://api.openalex.org/*",
+    "https://export.arxiv.org/*",
+    "https://arxiv.org/*",
+    "https://ar5iv.labs.arxiv.org/*",
+    "https://www.ebi.ac.uk/*",
     "https://openrouter.ai/*",
     "https://api.openai.com/*",
     "https://api.anthropic.com/*"

@@ -12,6 +12,12 @@
   const UNPAYWALL_API = "https://api.unpaywall.org/v2";
 
   const S2_FIELDS = "paperId,title,abstract,year,authors,externalIds";
+  // Used only by the batch DOI lookup (s2Batch): tldr is a usable weak
+  // fallback when abstract is null (a machine summary, still better than
+  // nothing for the judge), and openAccessPdf/externalIds are what route
+  // an entry into the arXiv/Europe PMC backfill pass when S2 itself has no
+  // abstract.
+  const S2_BATCH_FIELDS = "paperId,title,abstract,year,authors,externalIds,tldr,openAccessPdf";
 
   const SIM_THRESHOLD_ARXIV = 0.75;
   const SIM_THRESHOLD_TITLE = 0.85;
@@ -231,7 +237,7 @@
   // is a positional array aligned to the input `ids` array with `null` at
   // any index S2 doesn't have. Index into it; never match by returned DOI.
   const S2_BATCH_MAX = 500;
-  async function s2Batch(ids, { apiKey, fields = S2_FIELDS } = {}) {
+  async function s2Batch(ids, { apiKey, fields = S2_BATCH_FIELDS } = {}) {
     if (!ids.length) return { ok: true, papers: [], outcome: "ok_search_complete", chunkResults: [] };
     const headers = { "Content-Type": "application/json", ...(apiKey ? { "x-api-key": apiKey } : {}) };
     const chunks = [];
@@ -360,7 +366,53 @@
     return { ok: true, papers, outcome: allConclusive ? "ok_search_complete" : "partial", chunkResults };
   }
 
+  // Europe PMC — near-total abstract coverage for biomedical/life-science
+  // DOIs (including many preprints), essentially no CS/ML coverage. Used
+  // only as a backfill pass, not in the main DOI cascade, since it isn't a
+  // general-purpose scholarly index the way S2/OpenAlex/Crossref are.
+  const EUROPEPMC_API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search";
+  const EUROPEPMC_BATCH_MAX = 25;
+  async function europepmcBatchByDoi(dois) {
+    if (!dois.length) return { ok: true, papers: [], outcome: "ok_search_complete", chunkResults: [] };
+    const byDoi = new Map();
+    const chunkResults = [];
+    for (let i = 0; i < dois.length; i += EUROPEPMC_BATCH_MAX) {
+      const chunk = dois.slice(i, i + EUROPEPMC_BATCH_MAX);
+      const query = chunk.map((d) => `DOI:"${d}"`).join(" OR ");
+      const r = await getResult("europepmc", EUROPEPMC_API, { query, format: "json", resultType: "core", pageSize: 100 });
+      chunkResults.push({ outcome: r.outcome === "ok" ? "ok_search_complete" : r.outcome, status: r.status, error: r.error, n: chunk.length });
+      const items = (r.data && r.data.resultList && r.data.resultList.result) || [];
+      for (const item of items) {
+        const doi = (item.doi || "").toLowerCase();
+        if (doi) byDoi.set(doi, { title: item.title || "", abstract: item.abstractText || "", _source: "europepmc" });
+      }
+    }
+    const papers = dois.map((d) => byDoi.get((d || "").toLowerCase()) || null);
+    const allConclusive = chunkResults.every((cr) => CONCLUSIVE_SET.has(cr.outcome));
+    return { ok: true, papers, outcome: allConclusive ? "ok_search_complete" : "partial", chunkResults };
+  }
+
   const CONCLUSIVE_SET = new Set(["ok_record_with_abstract", "ok_record_no_abstract", "ok_no_record", "ok_search_complete"]);
+
+  // A single inconclusive attempt (rate limit, network error, timeout)
+  // must not by itself block a confident "this paper doesn't exist" / "no
+  // abstract exists" conclusion when OTHER independent providers already
+  // answered conclusively — e.g. a title search tries S2, Crossref, and
+  // OpenAlex; if S2 is rate-limited but Crossref and OpenAlex both
+  // genuinely searched and found nothing, that IS a confident answer.
+  // Requiring only "any single failure" (the original version of this
+  // check) meant one flaky provider could mark an entry inconclusive even
+  // when every other provider tried had already settled it — observed
+  // live: OpenAlex succeeding didn't stop entries from being reported as
+  // "rate-limited or failed" because S2 alone had failed. Requiring a
+  // majority of attempted providers to be conclusive fixes that while
+  // still correctly flagging genuinely under-answered entries (e.g. only
+  // 1 of 3 providers ever responded).
+  function isInconclusive(attempts) {
+    if (!attempts || attempts.length === 0) return true;
+    const conclusiveCount = attempts.filter((a) => CONCLUSIVE_SET.has(a.outcome)).length;
+    return conclusiveCount / attempts.length < 0.5;
+  }
 
   // ── Resolution cascade ──
   function extractDoiOrArxivFromUrl(url) {
@@ -377,17 +429,29 @@
     return Number.isNaN(n) ? def : n;
   }
 
-  async function resolveEntry(entry, cfg) {
-    const title = entry.title || "";
+  // Pulls whatever DOI/arXiv identifier a raw BibTeX entry carries — in
+  // doi/eprint fields directly, or mined out of a url field — before any
+  // network request is made. Shared by resolveEntry/resolveBatch's own
+  // partitioning AND by the cache lookup (enrichmentCache.js), so a paper
+  // already known by DOI/arXiv id from an earlier project can be found by
+  // that identifier instead of only by this project's BibTeX key.
+  function identifiersOf(entry) {
     let doi = (entry.doi || "").trim();
     let arxivId = (entry.eprint || "").trim();
     const url = entry.url || "";
-
     if (!doi && !arxivId && url) {
       const [urlDoi, urlArxiv] = extractDoiOrArxivFromUrl(url);
       doi = doi || urlDoi || "";
       arxivId = arxivId || urlArxiv || "";
     }
+    return { doi: doi || null, arxivId: arxivId || null };
+  }
+
+  async function resolveEntry(entry, cfg) {
+    const title = entry.title || "";
+    const { doi: doi0, arxivId: arxivId0 } = identifiersOf(entry);
+    let doi = doi0 || "";
+    let arxivId = arxivId0 || "";
 
     const s2Key = cfg.s2ApiKey;
     const oaKey = cfg.openalexApiKey;
@@ -396,17 +460,7 @@
     const attempts = [];
     const result = { ...entry };
 
-    // Conclusive outcomes are ones a provider actually answered (found a
-    // record, found no record, or returned ambiguous results). Inconclusive
-    // outcomes (rate limits, network/server errors, timeouts) mean we never
-    // got a real answer — they must never be treated the same as "provider
-    // says no such paper exists".
-    const CONCLUSIVE_OUTCOMES = new Set(["ok_record_with_abstract", "ok_record_no_abstract", "ok_no_record", "ok_search_complete"]);
-    let hadInconclusiveAttempt = false;
-
     function recordAttempt(base, r, extra) {
-      const inconclusive = !r || !CONCLUSIVE_OUTCOMES.has(r.outcome);
-      if (inconclusive) hadInconclusiveAttempt = true;
       attempts.push({
         ...base,
         outcome: r ? r.outcome : "network_error",
@@ -417,6 +471,16 @@
       });
     }
 
+    // Single-shot accept: matches a paper and records whatever abstract
+    // came back with it, with no per-entry serial backfill. Filling in a
+    // still-missing abstract is now Phase 2's job, done once, in a batch,
+    // across every entry resolveBatch touched (DOI-matched, arXiv-matched,
+    // and title-matched alike) — see backfillMissingAbstracts() below. The
+    // old version of this function looped through S2/OpenAlex one at a
+    // time per entry to find an abstract; that's exactly the
+    // one-request-per-paper pattern batching exists to eliminate, and it
+    // had the same swallowed-429 blindness recordAttempt() now prevents
+    // everywhere else.
     function accept(paper, { status, matchedBy, sim, yearMatched }) {
       const abstract = paper.abstract || invertAbstract(paper.abstract_inverted_index);
       result.abstract = abstract || "";
@@ -429,22 +493,6 @@
         };
       } else if (paper._source === "crossref") {
         externalIds = { DOI: paper.DOI };
-      }
-
-      // All not-already-tried candidates, in order — acceptAsync tries
-      // each in turn until one yields an abstract, matching Python's
-      // for-loop-with-continue-on-failure (not just the first candidate;
-      // a bug here silently dropped the openalex fallback whenever the
-      // first candidate resolved a paper but still had no abstract).
-      let backfillCandidates = [];
-      if (!result.abstract) {
-        const backfillDoi = externalIds.DOI;
-        if (backfillDoi) {
-          backfillCandidates = [
-            ["semantic_scholar", () => s2ById("DOI", backfillDoi, { apiKey: s2Key })],
-            ["openalex", () => openalexByDoi(backfillDoi, { mailto, apiKey: oaKey })],
-          ].filter(([src]) => src !== paper._source);
-        }
       }
 
       const matchedTitle = titleOf(paper);
@@ -462,48 +510,22 @@
         attempts,
         fetched_at: null,
         resolver_version: "1",
+        had_inconclusive_attempt: isInconclusive(attempts),
       };
-      return { result, backfillCandidates };
-    }
-
-    async function acceptAsync(paper, opts) {
-      const { result: r, backfillCandidates } = accept(paper, opts);
-      for (const [src, fn] of backfillCandidates) {
-        let alt;
-        try {
-          alt = await fn();
-        } catch (e) {
-          recordAttempt({ provider: src, method: "abstract_backfill" }, null, { error: String(e) });
-          continue;
-        }
-        const altPaper = alt && alt.data;
-        const altAbstract = altPaper ? (altPaper.abstract || invertAbstract(altPaper.abstract_inverted_index)) : "";
-        recordAttempt({ provider: src, method: "abstract_backfill" }, alt, { n_results: altPaper ? 1 : 0, found_abstract: !!altAbstract });
-        if (altAbstract) {
-          r.abstract = altAbstract;
-          r.evidence.abstract_chars = altAbstract.length;
-          r.evidence.abstract_backfilled_from = src;
-          break;
-        }
-      }
-      // Even a matched paper may end up with no evidence if every backfill
-      // attempt was inconclusive (rate-limited) rather than a confirmed
-      // "no abstract" — mark it so the cache doesn't treat this the same
-      // as a paper that genuinely has no abstract.
-      r.evidence.had_inconclusive_attempt = hadInconclusiveAttempt;
-      return r;
+      return result;
     }
 
     function rejectAll() {
+      const inconclusive = isInconclusive(attempts);
       result.abstract = "";
       result.evidence = {
-        status: hadInconclusiveAttempt ? "unresolved_incomplete" : "unresolved",
+        status: inconclusive ? "unresolved_incomplete" : "unresolved",
         source: null, matched_by: null, matched_title: "",
         title_similarity: null, year_matched: null,
         external_ids: {}, abstract_chars: 0,
         full_text: { status: "not_attempted", source_url: "", chars: 0, error: null },
         attempts, fetched_at: null, resolver_version: "1",
-        had_inconclusive_attempt: hadInconclusiveAttempt,
+        had_inconclusive_attempt: inconclusive,
       };
       return result;
     }
@@ -528,12 +550,13 @@
           const sim = titleSim(title, titleOf(paper));
           recordAttempt({ provider: source, method: "doi" }, r, { n_results: 1, best_similarity: sim });
           const status = sim >= 0.5 || !title ? "matched_doi" : "matched_low_confidence";
-          return acceptAsync(paper, { status, matchedBy: "doi", sim, yearMatched: null });
+          return accept(paper, { status, matchedBy: "doi", sim, yearMatched: null });
         }
         // outcome is either ok_no_record (provider conclusively has no
         // record for this DOI) or an inconclusive outcome (rate limited,
-        // network error, ...) — recordAttempt() tags hadInconclusiveAttempt
-        // for the latter so it is never conflated with the former.
+        // network error, ...) — isInconclusive() classifies the whole
+        // attempts array afterward, by majority, so this one failing
+        // doesn't by itself discard what other providers conclusively found.
         recordAttempt({ provider: source, method: "doi" }, r, { n_results: 0 });
       }
     }
@@ -551,7 +574,7 @@
         const sim = titleSim(title, paper.title || "");
         recordAttempt({ provider: "semantic_scholar", method: "arxiv" }, r, { n_results: 1, best_similarity: sim });
         if (sim >= SIM_THRESHOLD_ARXIV || !title) {
-          return acceptAsync(paper, { status: "matched_arxiv", matchedBy: "arxiv", sim, yearMatched: null });
+          return accept(paper, { status: "matched_arxiv", matchedBy: "arxiv", sim, yearMatched: null });
         }
       } else if (r) {
         recordAttempt({ provider: "semantic_scholar", method: "arxiv" }, r, { n_results: 0 });
@@ -599,9 +622,9 @@
         }
         if (bestSim >= SIM_THRESHOLD_TITLE || (bestSim >= SIM_THRESHOLD_TITLE_YEAR_MATCH && yearMatched)) {
           const status = bestSim >= SIM_THRESHOLD_TITLE ? "matched_title" : "matched_fuzzy";
-          return acceptAsync(best, { status, matchedBy: "title_search", sim: bestSim, yearMatched });
+          return accept(best, { status, matchedBy: "title_search", sim: bestSim, yearMatched });
         } else if (bestSim >= 0.5) {
-          return acceptAsync(best, { status: "matched_low_confidence", matchedBy: "title_search", sim: bestSim, yearMatched });
+          return accept(best, { status: "matched_low_confidence", matchedBy: "title_search", sim: bestSim, yearMatched });
         }
       }
     }
@@ -626,7 +649,7 @@
     } else if (paper._source === "crossref") {
       externalIds = { DOI: paper.DOI };
     }
-    const hadInconclusive = attempts.some((a) => !CONCLUSIVE_SET.has(a.outcome));
+    const hadInconclusive = isInconclusive(attempts);
     return {
       ...entry,
       abstract,
@@ -641,7 +664,7 @@
   }
 
   function buildUnresolvedEntry(entry, attempts) {
-    const hadInconclusive = attempts.some((a) => !CONCLUSIVE_SET.has(a.outcome));
+    const hadInconclusive = isInconclusive(attempts);
     return {
       ...entry,
       abstract: "",
@@ -673,14 +696,7 @@
     const doiIdx = [], arxivIdx = [], residueIdx = [];
     const doiOf = new Map(), arxivOf = new Map();
     entries.forEach((entry, i) => {
-      let doi = (entry.doi || "").trim();
-      let arxivId = (entry.eprint || "").trim();
-      const url = entry.url || "";
-      if (!doi && !arxivId && url) {
-        const [urlDoi, urlArxiv] = extractDoiOrArxivFromUrl(url);
-        doi = doi || urlDoi || "";
-        arxivId = arxivId || urlArxiv || "";
-      }
+      const { doi, arxivId } = identifiersOf(entry);
       if (doi) { doiIdx.push(i); doiOf.set(i, doi); }
       else if (arxivId) { arxivIdx.push(i); arxivOf.set(i, arxivId); }
       else residueIdx.push(i);
@@ -716,6 +732,11 @@
           const sim = titleSim(entry.title || "", titleOf(paper));
           const status = sim >= 0.5 || !entry.title ? "matched_doi" : "matched_low_confidence";
           results[idx] = buildResolvedEntry(entry, paper, { status, matchedBy: "doi", sim, yearMatched: null, attempts });
+          // Stash S2's machine-generated tldr (if any) as a last-resort
+          // fallback for backfillMissingAbstracts() below — weaker than a
+          // real abstract, only used if arXiv/Europe PMC also come up empty.
+          const tldrText = s2Paper && s2Paper.tldr && s2Paper.tldr.text;
+          if (tldrText) results[idx].evidence.tldr = tldrText;
         } else {
           results[idx] = buildUnresolvedEntry(entry, attempts);
         }
@@ -761,7 +782,85 @@
       tick(entry.key, resolved.evidence.status);
     }
 
+    await backfillMissingAbstracts(results);
+
     return results;
+  }
+
+  // One batched pass, run once across every matched-but-abstract-less
+  // entry regardless of which path found it (DOI batch, arXiv batch, or
+  // the title-search residue) — the direct replacement for the deleted
+  // per-entry serial backfill loop. Ordered by measured abstract-coverage
+  // value for a CS/ML-heavy bibliography: arXiv (always has an abstract
+  // when the id is real) first, then Europe PMC (biomedical/preprint
+  // coverage), then S2's machine-generated tldr as an absolute last resort.
+  async function backfillMissingAbstracts(results) {
+    const arxivCandidates = []; // { idx, arxivId }
+    const doiCandidates = []; // { idx, doi }
+    results.forEach((r, idx) => {
+      if (!r || !r.evidence || r.evidence.abstract_chars > 0) return;
+      const status = r.evidence.status;
+      if (!status || status === "unresolved" || status === "unresolved_incomplete") return; // nothing matched — nothing to backfill
+      const ext = r.evidence.external_ids || {};
+      const arxivId = ext.ArXiv || ext.arxiv;
+      if (arxivId && r.evidence.source !== "arxiv") arxivCandidates.push({ idx, arxivId });
+      else if (ext.DOI) doiCandidates.push({ idx, doi: ext.DOI });
+    });
+
+    if (arxivCandidates.length) {
+      const axRes = await arxivBatch(arxivCandidates.map((c) => c.arxivId));
+      arxivCandidates.forEach((c, j) => {
+        const r = results[c.idx];
+        const paper = axRes.papers[j];
+        r.evidence.attempts.push({
+          provider: "arxiv", method: "abstract_backfill_batch",
+          outcome: batchOutcomeFor(paper, axRes.outcome, true), n_results: paper ? 1 : 0,
+        });
+        if (paper && paper.abstract) {
+          r.abstract = paper.abstract;
+          r.evidence.abstract_chars = paper.abstract.length;
+          r.evidence.abstract_backfilled_from = "arxiv";
+        } else if (!CONCLUSIVE_SET.has(axRes.outcome === "ok" ? "ok_search_complete" : axRes.outcome)) {
+          r.evidence.had_inconclusive_attempt = true;
+        } else {
+          doiCandidates.push(r.evidence.external_ids.DOI ? { idx: c.idx, doi: r.evidence.external_ids.DOI } : null);
+        }
+      });
+    }
+
+    const dedupedDoiCandidates = doiCandidates.filter((c) => c && results[c.idx].evidence.abstract_chars === 0);
+    if (dedupedDoiCandidates.length) {
+      const epmcRes = await europepmcBatchByDoi(dedupedDoiCandidates.map((c) => c.doi));
+      dedupedDoiCandidates.forEach((c, j) => {
+        const r = results[c.idx];
+        if (r.evidence.abstract_chars > 0) return; // filled by the arXiv pass above
+        const paper = epmcRes.papers[j];
+        r.evidence.attempts.push({
+          provider: "europepmc", method: "abstract_backfill_batch",
+          outcome: paper ? "ok_record_with_abstract" : (epmcRes.outcome === "ok" ? "ok_no_record" : epmcRes.outcome),
+          n_results: paper ? 1 : 0,
+        });
+        if (paper && paper.abstract) {
+          r.abstract = paper.abstract;
+          r.evidence.abstract_chars = paper.abstract.length;
+          r.evidence.abstract_backfilled_from = "europepmc";
+        } else if (!CONCLUSIVE_SET.has(epmcRes.outcome)) {
+          r.evidence.had_inconclusive_attempt = true;
+        }
+      });
+    }
+
+    // Last resort: S2's machine-generated tldr, if one was stashed during
+    // the DOI phase and nothing above filled the abstract in. Weaker than
+    // real evidence, so it's marked distinctly rather than presented as
+    // abstract_backfilled_from a real provider.
+    for (const r of results) {
+      if (r && r.evidence && r.evidence.abstract_chars === 0 && r.evidence.tldr) {
+        r.abstract = r.evidence.tldr;
+        r.evidence.abstract_chars = r.evidence.tldr.length;
+        r.evidence.abstract_backfilled_from = "tldr";
+      }
+    }
   }
 
   // Conservative starting budgets — AIMD in rateLimiter.js adapts these up
@@ -775,7 +874,14 @@
     // connection — minIntervalMs is the floor that enforces that spacing
     // regardless of how the token bucket is otherwise configured.
     self.ScribeRateLimiter.configure("arxiv_api", { rps: 0.333, burst: 1, concurrency: 1, minIntervalMs: 3000, floorRps: 0.1 });
+    // No official published SLA — the observed soft limit is well under
+    // 10 req/s with aggressive throttling on bursts; conservative starting
+    // point since this is a backfill-only source, not on the critical path.
+    self.ScribeRateLimiter.configure("europepmc", { rps: 4, burst: 2, concurrency: 2, floorRps: 0.5 });
   }
 
-  self.ScribeResolvers = { titleSim, normTitle, resolveEntry, resolveBatch, invertAbstract, s2Batch, openalexBatchByDoi, crossrefBatchByDoi, arxivBatch };
+  self.ScribeResolvers = {
+    titleSim, normTitle, resolveEntry, resolveBatch, invertAbstract, identifiersOf,
+    s2Batch, openalexBatchByDoi, crossrefBatchByDoi, arxivBatch, europepmcBatchByDoi,
+  };
 })();

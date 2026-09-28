@@ -243,12 +243,32 @@
   // up to twice at 180s each plus a 10s delay (~370s) before its progress
   // callback fires, and a generation attempt can run up to 300s before its
   // retry re-fires progress. 8 minutes clears both with margin.
+  // background.js reports this exact prefix when the service worker
+  // restarted mid-job and lost its in-memory job store (jobs are kept in a
+  // plain Map, not persisted — a restart is indistinguishable from the job
+  // never having existed). That's a real possibility on a long-running
+  // job even with the keepalive port, since Chrome can still recycle a
+  // worker (extension update, browser resource pressure, manual reload).
+  const UNKNOWN_JOB_PREFIX = "unknown job id:";
+
   async function pollJob(jobId, onProgress, { intervalMs = 1500, stallMs = 8 * 60 * 1000 } = {}) {
     let deadline = Date.now() + stallMs;
     let lastKey = null;
     while (Date.now() < deadline) {
       const { result, error } = await sendToBackground("SCRIBE_POLL_JOB", { jobId });
-      if (error) throw new Error(error);
+      if (error) {
+        if (error.startsWith(UNKNOWN_JOB_PREFIX)) {
+          // Same underlying situation as the stall-timeout below, just
+          // discovered a different way — give the same reassuring,
+          // accurate message instead of the raw internal error string.
+          throw new Error(
+            "the background worker restarted while this job was running. Enrichment caches each " +
+            "reference as it resolves, so running Check again will pick up where this left off " +
+            "instead of starting over."
+          );
+        }
+        throw new Error(error);
+      }
       if (onProgress) onProgress(result.progress);
       if (result.status === "done") return result.result;
       if (result.status === "error") throw new Error(result.error || "job failed");
@@ -272,18 +292,31 @@
     );
   }
 
-  // Opens a runtime port for the job's duration — a connected port stops
-  // Chrome from idling the service worker out mid-job (background.js's
-  // header comment on the ~30s idle timeout). Not a job payload channel,
-  // just a keep-alive signal; SCRIBE_START_JOB/SCRIBE_POLL_JOB still carry
-  // the actual data over sendMessage as before.
+  // Opens a runtime port for the job's duration and pings it periodically.
+  // A connected port does NOT by itself stop Chrome idling the service
+  // worker out mid-job — it's traffic ON the port that resets the idle
+  // timer, so simply holding the connection open (as this used to do) was
+  // a no-op after the initial connect event. Not a job payload channel;
+  // SCRIBE_START_JOB/SCRIBE_POLL_JOB still carry the actual data over
+  // sendMessage as before.
+  const KEEPALIVE_PING_MS = 15000;
+
   async function startAndAwaitJob(path, body, onProgress) {
     const keepAlive = chrome.runtime.connect({ name: "scribe-job" });
+    const pingTimer = setInterval(() => {
+      try {
+        keepAlive.postMessage({ type: "ping" });
+      } catch {
+        // Port already disconnected (worker restarted) — pollJob's own
+        // unknown-job-id handling covers this; nothing to do here.
+      }
+    }, KEEPALIVE_PING_MS);
     try {
       const { result: started, error: startErr } = await sendToBackground("SCRIBE_START_JOB", { path, body });
       if (startErr) throw new Error(startErr);
       return await pollJob(started.job_id, onProgress);
     } finally {
+      clearInterval(pingTimer);
       keepAlive.disconnect();
     }
   }
@@ -516,6 +549,32 @@
     bibRow.appendChild(bibInput);
     body.appendChild(bibRow);
 
+    // -- Target length row --
+    // Python's batch pipeline computes this automatically from a
+    // ground-truth Related Work section it deliberately stripped out
+    // before generation (generate_related_work.py: target_word_count =
+    // len(ground_truth.split())) — that's a benchmarking artifact with no
+    // equivalent here (a live Overleaf doc isn't guaranteed to already
+    // have a Related Work section to measure, and this isn't a strip-and-
+    // replace tool). So instead of auto-computing it, the user just types
+    // the number they want; buildGenerationPrompt's length-guideline
+    // instruction (genPrompts.js) is already wired to use it, it was just
+    // never being supplied from anywhere.
+    const wordCountRow = document.createElement("div");
+    wordCountRow.className = "scribe-row";
+    const wordCountLabel = document.createElement("span");
+    wordCountLabel.className = "scribe-label";
+    wordCountLabel.textContent = "Target length (words)";
+    const wordCountInput = document.createElement("input");
+    wordCountInput.type = "number";
+    wordCountInput.min = "1";
+    wordCountInput.step = "1";
+    wordCountInput.className = "scribe-input";
+    wordCountInput.placeholder = "optional";
+    wordCountRow.appendChild(wordCountLabel);
+    wordCountRow.appendChild(wordCountInput);
+    body.appendChild(wordCountRow);
+
     // -- Primary actions --
     const actionRow = document.createElement("div");
     actionRow.className = "scribe-actions";
@@ -657,9 +716,14 @@
         }
 
         setStatus("generating (this can take a bit)...");
+        const targetWordCount = parseInt(wordCountInput.value, 10);
+        const genBody = { tex_source: tex, bib_content: bib };
+        if (Number.isFinite(targetWordCount) && targetWordCount > 0) {
+          genBody.target_word_count = targetWordCount;
+        }
         const genResult = await startAndAwaitJob(
           "/jobs/generate",
-          { tex_source: tex, bib_content: bib },
+          genBody,
           (progress) => setStatus(`generating: ${progress.stage} (${progress.done}/${progress.total})`)
         );
         state.generatedText = genResult.latex_output || genResult.markdown_output || genResult.raw_output;
@@ -759,11 +823,19 @@
   // repeating "unverifiable" with no further detail.
   const UNVERIFIABLE_REASONS = {
     key_not_in_bib: "citation key not found in the bibliography",
-    low_confidence_match: "matched a paper, but the match was too shaky to trust",
+    low_confidence_match: "matched a paper, but the match was too shaky to trust — couldn't confidently identify which paper this is",
     no_evidence: "no abstract or full text was retrieved for the cited paper",
     judge_omitted_from_response: "the judge's response silently skipped this citation",
   };
-  function unverifiableReason(source) {
+  // "no_evidence" (and low_confidence_match, if the match itself was
+  // inconclusive) can mean either "this paper genuinely has nothing
+  // retrievable" or "a provider request was rate-limited/errored and we
+  // never got a real answer" — those read very differently, and only the
+  // second is fixed by adding an API key or just re-running Check.
+  function unverifiableReason(source, inconclusive) {
+    if (inconclusive && (source === "no_evidence" || source === "low_confidence_match")) {
+      return "a retrieval request was rate-limited or failed rather than confirming this paper has no evidence — try Check again, or add an API key in Settings";
+    }
     return UNVERIFIABLE_REASONS[source] || "not enough retrieved evidence to check this claim";
   }
 
@@ -962,7 +1034,7 @@
             key: c.citation_key,
             extra: ordinal ? `mention ${ordinal}` : null,
             sentence: c.sentence,
-            justification: `Not checked: ${unverifiableReason(c.verdict_source)}.`,
+            justification: `Not checked: ${unverifiableReason(c.verdict_source, c.evidence_inconclusive)}.`,
             charStart: c.char_start,
             fromDraft,
           });
@@ -1584,6 +1656,7 @@
     makeButton("Ping background", () => report("background round-trip", sendToBackground("PING", {})));
     makeButton("Probe file access", () => report("SCRIBE_PROBE_FILES", callInject("SCRIBE_PROBE_FILES")));
     makeButton("Health check", () => report("SCRIBE_HEALTH", sendToBackground("SCRIBE_HEALTH", {})));
+    makeButton("Retrieval stats", () => report("SCRIBE_RETRIEVAL_STATS", sendToBackground("SCRIBE_RETRIEVAL_STATS", {})));
 
     container.appendChild(btnRow);
 

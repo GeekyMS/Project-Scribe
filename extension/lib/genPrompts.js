@@ -104,29 +104,37 @@ Cite papers using the exact citation keys from the BibTeX entries above.
 Do NOT cite any paper not listed above. Do NOT make up citations.`;
   }
 
-  function buildEvidenceSupportPrompt(claimsBatch) {
-    const itemsText = claimsBatch.map((item) => {
-      const coCited = item.co_cited_keys || [];
-      const coCitedNote = coCited.length
-        ? `\n**Also cited in this sentence:** ${coCited.join(", ")} (attribute the claim to [${item.key}] specifically, not to these)`
-        : "";
-      const kindLabel = item.evidence_kind === "full_text" ? "FULL TEXT (truncated)" : "ABSTRACT";
-      return `### Citation [${item.citation_id}] — key: ${item.key}
+  // Groups a batch's items by paper key and emits each paper's evidence
+  // text ONCE, followed by every citation of it — not once per citation.
+  // Before this, a paper cited 5 times in one batch had its full text (up
+  // to several thousand chars, more with Phase 3's structured full text)
+  // repeated 5 times in the prompt. Grouping also gives Anthropic prompt
+  // caching (see llmProviders.js's cache_control wiring) a stable,
+  // non-duplicated block per paper to work with.
+  function groupClaimsByPaper(claimsBatch) {
+    const order = [];
+    const byKey = new Map();
+    for (const item of claimsBatch) {
+      if (!byKey.has(item.key)) {
+        byKey.set(item.key, { key: item.key, paper_title: item.paper_title, evidence_kind: item.evidence_kind, evidence_text: item.evidence_text, items: [] });
+        order.push(item.key);
+      }
+      byKey.get(item.key).items.push(item);
+    }
+    return order.map((k) => byKey.get(k));
+  }
 
-**Sentence citing this paper:** "${item.sentence}"
-**Surrounding context:** "${item.context}"${coCitedNote}
-
-**Cited paper title:** ${item.paper_title || "Unknown"}
-**Cited paper ${kindLabel}:**
-<evidence>
-${item.evidence_text || ""}
-</evidence>
-`;
-    });
-
-    const itemsBlock = itemsText.join("\n");
-
-    return `You are a rigorous fact-checker for academic writing. For each citation below, you are given the SENTENCE that cites a paper and the ACTUAL TEXT of that cited paper (its full text or abstract). Your job is NOT to judge writing quality — it is to check whether the cited paper actually supports what the sentence claims about it.
+  // Static instructions, identical across every batch of a job — split out
+  // from the per-batch content specifically so it can be sent as an
+  // Anthropic cache_control-marked system block (see llmProviders.js). A
+  // job with N batches previously paid full price for these ~300 tokens N
+  // times; this makes only the first pay full price and the rest read
+  // from cache. It's a modest saving (the dominant cost is each paper's
+  // evidence text, not this preamble) but a real and low-risk one — it
+  // doesn't depend on solving how to keep one paper's evidence text
+  // aligned to the same cache breakpoint across non-consecutive batches.
+  function buildEvidenceSupportSystemPrompt() {
+    return `You are a rigorous fact-checker for academic writing. For each citation given, you are given the SENTENCE that cites a paper and the ACTUAL TEXT of that cited paper (its full text or abstract). Your job is NOT to judge writing quality — it is to check whether the cited paper actually supports what the sentence claims about it.
 
 ## YOUR TASK, PER CITATION
 1. Identify the specific assertion the sentence makes about the cited paper — what is it claiming this paper did, found, showed, or argued? (\`claim\`)
@@ -146,12 +154,8 @@ ${item.evidence_text || ""}
 5. If supported or partially supported, quote the specific span of evidence text that backs it (\`evidence_quote\`) — copy it verbatim, do not paraphrase.
 6. Give a one-sentence justification (≤40 words).
 
-## CITATIONS TO CHECK
-
-${itemsBlock}
-
 ## OUTPUT FORMAT
-Return ONLY valid JSON, with exactly one entry per citation_id above:
+Return ONLY valid JSON, with exactly one entry per citation_id given:
 {
     "verdicts": [
         {
@@ -169,5 +173,43 @@ Return ONLY valid JSON, with exactly one entry per citation_id above:
 Respond with JSON only.`;
   }
 
-  self.ScribeGenPrompts = { buildGenerationPrompt, buildEvidenceSupportPrompt };
+  function buildEvidenceSupportUserPrompt(claimsBatch) {
+    const papers = groupClaimsByPaper(claimsBatch);
+    const paperBlocks = papers.map((p) => {
+      const kindLabel = p.evidence_kind === "full_text" ? "FULL TEXT (truncated)" : "ABSTRACT";
+      const claimsText = p.items.map((item) => {
+        const coCited = item.co_cited_keys || [];
+        const coCitedNote = coCited.length
+          ? ` (also cited alongside: ${coCited.join(", ")} — attribute the claim to [${p.key}] specifically, not to these)`
+          : "";
+        return `- Citation [${item.citation_id}] — sentence: "${item.sentence}"\n  Surrounding context: "${item.context}"${coCitedNote}`;
+      }).join("\n");
+
+      return `### Paper: ${p.paper_title || "Unknown"} (key: ${p.key})
+
+**${kindLabel}:**
+<evidence>
+${p.evidence_text || ""}
+</evidence>
+
+**Sentences citing this paper, to check individually:**
+${claimsText}
+`;
+    });
+
+    return `## CITATIONS TO CHECK\n\n${paperBlocks.join("\n")}`;
+  }
+
+  // Kept for any external/debug caller that wants the whole thing as one
+  // string (e.g. logging what was sent) — evaluator.js itself calls the
+  // system/user builders separately so it can mark the system half
+  // cacheable.
+  function buildEvidenceSupportPrompt(claimsBatch) {
+    return `${buildEvidenceSupportSystemPrompt()}\n\n${buildEvidenceSupportUserPrompt(claimsBatch)}`;
+  }
+
+  self.ScribeGenPrompts = {
+    buildGenerationPrompt, buildEvidenceSupportPrompt,
+    buildEvidenceSupportSystemPrompt, buildEvidenceSupportUserPrompt,
+  };
 })();
